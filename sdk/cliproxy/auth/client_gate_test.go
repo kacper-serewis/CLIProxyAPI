@@ -10,10 +10,12 @@ import (
 
 func TestClientKindFromUserAgent(t *testing.T) {
 	cases := map[string]string{
-		"claude-cli/2.1.310 (external, cli)":                     ClientKindClaudeCode,
-		"claude-cli/2.1.310 (external, sdk-ts, agent-sdk/0.3.1)": ClientKindClaudeCode,
-		"codex_cli_rs/0.164.0 (Mac OS 27.2.0; arm64) iTerm.app":  ClientKindCodex,
-		"codex_exec/0.164.0 (Mac OS 27.2.0; arm64)":              ClientKindCodex,
+		"claude-cli/2.1.310 (external, cli)":                                                    ClientKindClaudeCode,
+		"claude-cli/2.1.310 (external, sdk-ts, agent-sdk/0.3.1)":                                ClientKindClaudeCode,
+		"codex_cli_rs/0.164.0 (Mac OS 27.2.0; arm64) iTerm.app":                                 ClientKindCodex,
+		"codex_exec/0.164.0 (Mac OS 27.2.0; arm64)":                                             ClientKindCodex,
+		"T3 Code/0.164.0 (Mac OS 27.2.0; arm64) unknown (T3 Code; 0.1.4-nightly.20261027.3770)": ClientKindCodex,
+		"T3 Code/0.164.0":      "",
 		"claude-cli":           "",
 		"Cursor/1.0":           "",
 		"python-requests/2.32": "",
