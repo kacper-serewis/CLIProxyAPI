@@ -2380,6 +2380,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	if selected == nil {
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
+	recordRoutingActivity(selected, model, opts, time.Now())
 	authCopy := selected.Clone()
 	if !selected.indexAssigned {
 		m.mu.Lock()
@@ -2607,6 +2608,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if selected == nil {
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
+	recordRoutingActivity(selected, model, opts, time.Now())
 	authCopy := selected.Clone()
 	if !selected.indexAssigned {
 		m.mu.Lock()
@@ -2853,6 +2855,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if selected == nil {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
+	recordRoutingActivity(selected, model, opts, time.Now())
 	providerKey := executorKeyFromAuth(selected)
 	executor, okExecutor := m.Executor(providerKey)
 	if !okExecutor {
@@ -2943,6 +2946,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if selected == nil {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
+	recordRoutingActivity(selected, model, opts, time.Now())
 	executor, okExecutor := m.Executor(providerKey)
 	if !okExecutor {
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
