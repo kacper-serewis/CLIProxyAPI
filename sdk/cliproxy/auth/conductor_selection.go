@@ -87,6 +87,8 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	// excludeClaudeOAuth hides Claude subscription credentials from non-Claude-Code clients.
+	excludeClaudeOAuth bool
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -111,6 +113,9 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
 	}
+	if claudeOAuthRequiresClaudeCode.Load() {
+		eligibility.excludeClaudeOAuth = ClientKindFromUserAgent(requestUserAgent(ctx, opts)) != ClientKindClaudeCode
+	}
 	return eligibility
 }
 
@@ -122,6 +127,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 		return false
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
+		return false
+	}
+	if e.excludeClaudeOAuth && isClaudeOAuthAuth(auth) {
 		return false
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
