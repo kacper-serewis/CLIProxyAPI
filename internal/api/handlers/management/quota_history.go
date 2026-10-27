@@ -3,6 +3,7 @@ package management
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -32,4 +33,21 @@ func (h *Handler) GetQuotaHistory(c *gin.Context) {
 		points = []coreauth.QuotaHistoryPoint{}
 	}
 	c.JSON(http.StatusOK, gin.H{"points": points})
+}
+
+// GetRoutingActivity returns which credential and model each tracked session is using,
+// and the order soonest-reset would assign credentials to a new session per provider.
+func (h *Handler) GetRoutingActivity(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager unavailable"})
+		return
+	}
+	now := time.Now()
+	c.JSON(http.StatusOK, gin.H{
+		"sessions": h.authManager.RoutingSessions(),
+		"next": gin.H{
+			"claude": h.authManager.RoutingQueue("claude", now),
+			"codex":  h.authManager.RoutingQueue("codex", now),
+		},
+	})
 }
