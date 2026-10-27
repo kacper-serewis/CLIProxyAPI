@@ -22,6 +22,11 @@ const (
 // "claude-cli/2.1.310 (external, cli)" or "claude-cli/2.1.310 (external, sdk-ts, agent-sdk/0.3.1)".
 var claudeCodeClientUserAgentPattern = regexp.MustCompile(`(?i)^claude-cli/[0-9]+\.[0-9]+\.[0-9]+\s+\(external,`)
 
+// t3CodeCodexUserAgentPattern matches Codex embedded in T3 Code, which reports T3 Code as
+// its originator and client, for example
+// "T3 Code/0.164.0 (Mac OS 27.2.0; arm64) unknown (T3 Code; 0.1.4-nightly.20261027.3770)".
+var t3CodeCodexUserAgentPattern = regexp.MustCompile(`^T3 Code/[0-9]+\.[0-9]+\.[0-9]+ \([^)]*\) .*\(T3 Code; [^)]+\)$`)
+
 var claudeOAuthRequiresClaudeCode atomic.Bool
 
 // SetClaudeOAuthRequiresClaudeCode restricts Claude OAuth (subscription) credentials to
@@ -38,7 +43,7 @@ func ClientKindFromUserAgent(userAgent string) string {
 	switch {
 	case claudeCodeClientUserAgentPattern.MatchString(userAgent):
 		return ClientKindClaudeCode
-	case IsCodexClientUserAgent(userAgent):
+	case IsCodexClientUserAgent(userAgent), t3CodeCodexUserAgentPattern.MatchString(userAgent):
 		return ClientKindCodex
 	default:
 		return ""
