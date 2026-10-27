@@ -25,14 +25,20 @@ const (
 	// quotaHistoryHeartbeat records an unchanged observation so charts can tell
 	// "still the same" from "no data".
 	quotaHistoryHeartbeat = time.Hour
-	quotaHistoryRetention = 30 * 24 * time.Hour
+	// quotaHistoryObservedStep records unchanged values again once the provider has
+	// reported them this much later, so readers can tell how fresh the values are.
+	quotaHistoryObservedStep = 10 * time.Minute
+	quotaHistoryRetention    = 30 * 24 * time.Hour
 )
 
 // QuotaHistoryPoint is one credential's quota observation. Usage values are fractions in
 // [0, 1]; reset values are unix seconds. The long window is Claude's 7d window or the
 // longer Codex window; the short window is Claude's 5h window or the shorter Codex one.
+// Observed is when the provider last reported these values (unix seconds; the quota only
+// updates on traffic through this proxy), At is when the point was recorded.
 type QuotaHistoryPoint struct {
 	At         int64   `json:"t"`
+	Observed   int64   `json:"observed,omitempty"`
 	Auth       string  `json:"auth"`
 	Provider   string  `json:"provider"`
 	LongUsed   float64 `json:"long_used"`
@@ -68,8 +74,9 @@ func (m *Manager) StartQuotaHistory(ctx context.Context, path string) {
 	}()
 }
 
-// sampleQuotaHistory returns the points that differ from, or are an hour newer than, the
-// last recorded point per credential, and updates last accordingly.
+// sampleQuotaHistory returns the points that differ from, were observed 10 minutes later
+// than, or are an hour newer than the last recorded point per credential, and updates last
+// accordingly.
 func sampleQuotaHistory(auths []*Auth, last map[string]QuotaHistoryPoint, now time.Time) []QuotaHistoryPoint {
 	var points []QuotaHistoryPoint
 	for _, auth := range auths {
@@ -77,7 +84,9 @@ func sampleQuotaHistory(auths []*Auth, last map[string]QuotaHistoryPoint, now ti
 		if !ok {
 			continue
 		}
-		if prev, seen := last[point.Auth]; seen && sameQuotaObservation(prev, point) && now.Unix()-prev.At < int64(quotaHistoryHeartbeat/time.Second) {
+		if prev, seen := last[point.Auth]; seen && sameQuotaObservation(prev, point) &&
+			now.Unix()-prev.At < int64(quotaHistoryHeartbeat/time.Second) &&
+			point.Observed-prev.Observed < int64(quotaHistoryObservedStep/time.Second) {
 			continue
 		}
 		last[point.Auth] = point
@@ -97,6 +106,9 @@ func quotaHistoryPointFor(auth *Auth, now time.Time) (QuotaHistoryPoint, bool) {
 		windows = codexQuotaWindows(auth.Quota.Signals, auth.Quota.ObservedAt)
 	}
 	point := QuotaHistoryPoint{At: now.Unix(), Auth: auth.ID, Provider: strings.ToLower(auth.Provider)}
+	if !auth.Quota.ObservedAt.IsZero() {
+		point.Observed = auth.Quota.ObservedAt.Unix()
+	}
 	hasLong := false
 	for _, w := range windows {
 		// A rolled-over window no longer describes current usage.
