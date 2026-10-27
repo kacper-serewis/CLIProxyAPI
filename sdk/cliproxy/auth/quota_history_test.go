@@ -33,6 +33,31 @@ func TestQuotaHistorySamplesOnlyChangesAndHeartbeats(t *testing.T) {
 	}
 }
 
+func TestQuotaHistoryRecordsWhenObserved(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	reset := now.Add(48 * time.Hour)
+	last := map[string]QuotaHistoryPoint{}
+	observed := func(at time.Time) *Auth {
+		auth := claudeHistoryAuth("a", 0.2, reset)
+		auth.Quota.ObservedAt = at
+		return auth
+	}
+
+	if got := sampleQuotaHistory([]*Auth{observed(now.Add(-time.Minute))}, last, now); len(got) != 1 || got[0].Observed != now.Add(-time.Minute).Unix() {
+		t.Fatalf("first sample = %+v, want observed one minute ago", got)
+	}
+	if got := sampleQuotaHistory([]*Auth{observed(now.Add(4 * time.Minute))}, last, now.Add(5*time.Minute)); len(got) != 0 {
+		t.Fatalf("recent observation recorded again: %+v", got)
+	}
+	if got := sampleQuotaHistory([]*Auth{observed(now.Add(10 * time.Minute))}, last, now.Add(11*time.Minute)); len(got) != 1 {
+		t.Fatalf("observation 11 minutes later not recorded")
+	}
+	// No traffic: the hourly heartbeat keeps the old observation time.
+	if got := sampleQuotaHistory([]*Auth{observed(now.Add(10 * time.Minute))}, last, now.Add(75*time.Minute)); len(got) != 1 || got[0].Observed != now.Add(10*time.Minute).Unix() {
+		t.Fatalf("heartbeat = %+v, want the old observation time", got)
+	}
+}
+
 func TestQuotaHistorySkipsRolledOverAndUnobserved(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	auths := []*Auth{claudeHistoryAuth("rolled", 0.9, now.Add(-time.Minute)), {ID: "fresh", Provider: "claude"}}
