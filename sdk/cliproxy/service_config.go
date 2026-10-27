@@ -260,6 +260,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
+	coreauth.SetClaudeOAuthRequiresClaudeCode(commit.cfg.Routing.ClaudeOAuthRequiresClaudeCode)
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
 		s.coreManager.SetSelector(newRoutingSelector(routingState))

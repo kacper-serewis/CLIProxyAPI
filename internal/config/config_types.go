@@ -487,6 +487,15 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// AllowedClients restricts proxy API endpoints to the listed client kinds, identified by
+	// user agent: "claude-code" and "codex". Empty allows every client. Management endpoints
+	// are not affected.
+	AllowedClients []string `yaml:"allowed-clients,omitempty" json:"allowed-clients,omitempty"`
+
+	// ClaudeOAuthRequiresClaudeCode makes Claude OAuth (subscription) credentials eligible only
+	// for requests sent by the Claude Code CLI, whatever endpoint or format they use.
+	ClaudeOAuthRequiresClaudeCode bool `yaml:"claude-oauth-requires-claude-code,omitempty" json:"claude-oauth-requires-claude-code,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
