@@ -244,6 +244,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// subscribe-config heartbeat connection is healthy.
 	engine.Use(s.homeHeartbeatMiddleware())
 	engine.Use(s.exampleAPIKeySafeModeMiddleware())
+	engine.Use(s.clientGateMiddleware())
 
 	// Setup routes
 	s.setupRoutes()
