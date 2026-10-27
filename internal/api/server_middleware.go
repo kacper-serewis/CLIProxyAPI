@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -597,5 +598,39 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 			return
 		}
 		c.Next()
+	}
+}
+
+// clientGateMiddleware rejects proxy API requests from clients outside routing.allowed-clients.
+// Management, health, and panel routes are not proxy paths and stay reachable.
+func (s *Server) clientGateMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+			c.Next()
+			return
+		}
+		cfg := s.getConfig()
+		if cfg == nil || len(cfg.Routing.AllowedClients) == 0 || !isExampleAPIKeySafeModeProxyPath(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
+		userAgent := c.Request.Header.Get("User-Agent")
+		kind := coreauth.ClientKindFromUserAgent(userAgent)
+		if kind != "" {
+			for _, allowed := range cfg.Routing.AllowedClients {
+				if strings.EqualFold(strings.TrimSpace(allowed), kind) {
+					c.Next()
+					return
+				}
+			}
+		}
+		if len(userAgent) > 120 {
+			userAgent = userAgent[:120]
+		}
+		log.Warnf("client gate: rejected %s %s from user-agent %q", c.Request.Method, c.Request.URL.Path, userAgent)
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":   "client_not_allowed",
+			"message": "This proxy only serves the clients listed in routing.allowed-clients.",
+		})
 	}
 }

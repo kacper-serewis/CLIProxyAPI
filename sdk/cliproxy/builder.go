@@ -262,6 +262,9 @@ func (b *Builder) Build() (*Service, error) {
 			}
 		}
 
+		if b.cfg != nil {
+			coreauth.SetClaudeOAuthRequiresClaudeCode(b.cfg.Routing.ClaudeOAuthRequiresClaudeCode)
+		}
 		routingState := normalizedRoutingRuntimeState(b.cfg)
 		coreManager = coreauth.NewManager(tokenStore, newRoutingSelector(routingState), nil)
 		appliedRoutingState = &routingState
