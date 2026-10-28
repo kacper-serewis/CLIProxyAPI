@@ -185,6 +185,7 @@ type resultPolicyHolder struct {
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
 	inFlightTracker           *inFlightTracker
+	adaptiveHistory           *quotaDemandHistory
 	store                     Store
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore
@@ -273,6 +274,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	}
 	manager := &Manager{
 		inFlightTracker:       newInFlightTracker(),
+		adaptiveHistory:       &quotaDemandHistory{},
 		store:                 store,
 		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
@@ -287,6 +289,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		providerOffsets:       make(map[string]int),
 		modelPoolOffsets:      make(map[string]int),
 	}
+	attachAdaptiveHistory(selector, manager.adaptiveHistory)
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelRouting.Store(&apiKeyModelRoutingSnapshot{config: &internalconfig.Config{}})
