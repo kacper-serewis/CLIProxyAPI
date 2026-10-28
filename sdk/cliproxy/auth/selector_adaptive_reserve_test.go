@@ -80,7 +80,7 @@ func TestAdaptiveReserveProfileRejectsResetsGapsAndHeartbeat(t *testing.T) {
 	now := time.Now()
 	points := demandPoints(now, false)
 	for i := 1; i < len(points); i++ {
-		points[i].ShortReset += int64(i)
+		points[i].ShortReset += int64(i) * 60
 	}
 	profile := buildDemandProfile(points, false, now)
 	if profile.recentHours != 0 {
@@ -178,7 +178,7 @@ func TestAdaptiveReserveQueueMatchesSelectionAndCooldown(t *testing.T) {
 
 func TestAdaptiveReserveUsageParserAndObservationIsolation(t *testing.T) {
 	now := time.Now()
-	valid := `{"five_hour":{"utilization":40,"resets_at":"2030-01-01T12:00:00Z"},"seven_day":{"utilization":50,"resets_at":"2030-01-04T12:00:00Z"}}`
+	valid := `{"member_dashboard_available":false,"limits":[],"weekly_scoped_shares":[],"five_hour":{"utilization":40,"resets_at":"2030-01-01T12:00:00Z"},"seven_day":{"utilization":50,"resets_at":"2030-01-04T12:00:00Z"}}`
 	signals, ok := parseAdaptiveUsage(strings.NewReader(valid), now)
 	if !ok || signals["Anthropic-Ratelimit-Unified-5h-Utilization"] != "0.400000" {
 		t.Fatal("valid usage rejected")
@@ -246,5 +246,18 @@ func TestAdaptiveReserveUnknownAndInvalidUsageIsNotFreeCapacity(t *testing.T) {
 	a, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, []*Auth{home, other})
 	if err != nil || a.ID != "other" {
 		t.Fatal("confirmed exhaustion must override home fallback")
+	}
+}
+
+func TestAdaptiveReserveUsageTimestampJitterPreservesDemand(t *testing.T) {
+	now := time.Now()
+	points := demandPoints(now, false)
+	original := buildDemandProfile(points, false, now)
+	for i := range points {
+		points[i].ShortReset += int64(i % 2)
+	}
+	jittered := buildDemandProfile(points, false, now)
+	if original.recentUsed != jittered.recentUsed || original.recentHours != jittered.recentHours {
+		t.Fatal("subsecond API reset rounding discarded real demand")
 	}
 }

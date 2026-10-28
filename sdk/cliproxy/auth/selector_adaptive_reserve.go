@@ -130,7 +130,9 @@ func buildDemandProfile(points []QuotaHistoryPoint, long bool, now time.Time) de
 		if long {
 			au, bu, ar, br = a.LongUsed, b.LongUsed, a.LongReset, b.LongReset
 		}
-		if ar == 0 || ar != br || bu < au || b.Observed >= br {
+		// The usage API computes reset timestamps with sub-second jitter; headers
+		// report whole seconds. A two-second difference is still the same window.
+		if ar == 0 || math.Abs(float64(ar-br)) > 2 || bu < au || b.Observed >= br {
 			continue
 		}
 		delta := bu - au
