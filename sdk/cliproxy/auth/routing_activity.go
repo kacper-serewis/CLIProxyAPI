@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/tidwall/gjson"
@@ -42,15 +43,16 @@ type RoutingSession struct {
 	Switches  []RoutingSwitch `json:"switches,omitempty"`
 }
 
-// RoutingCandidate is one credential in the order soonest-reset would try it for a new session.
+// RoutingCandidate describes a credential in the configured quota strategy’s new-session queue.
 type RoutingCandidate struct {
-	Auth        string    `json:"auth"`
-	Known       bool      `json:"known"`
-	LongReset   time.Time `json:"long_reset,omitempty"`
-	ShortUsage  float64   `json:"short_usage"`
-	Saturated   bool      `json:"saturated"`
-	Unavailable bool      `json:"unavailable"`
-	RetryAfter  time.Time `json:"retry_after,omitempty"`
+	Adaptive    *AdaptiveDecision `json:"adaptive,omitempty"`
+	Auth        string            `json:"auth"`
+	Known       bool              `json:"known"`
+	LongReset   time.Time         `json:"long_reset,omitempty"`
+	ShortUsage  float64           `json:"short_usage"`
+	Saturated   bool              `json:"saturated"`
+	Unavailable bool              `json:"unavailable"`
+	RetryAfter  time.Time         `json:"retry_after,omitempty"`
 }
 
 var routingActivity = struct {
@@ -188,9 +190,13 @@ func (m *Manager) RoutingSessions() []RoutingSession {
 	return sessions
 }
 
-// RoutingQueue returns a provider's enabled credentials in the order soonest-reset ranks
+// RoutingQueue returns a provider's enabled credentials in the order the quota strategy ranks
 // them for a new session. Credentials in cooldown are listed last.
 func (m *Manager) RoutingQueue(provider string, now time.Time) []RoutingCandidate {
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Routing.Strategy), "adaptive-reserve") && strings.EqualFold(provider, "claude") {
+		return m.adaptiveRoutingQueue(cfg.Routing.HomeAccount, provider, now)
+	}
 	var ranks []soonestResetRank
 	for _, auth := range m.List() {
 		if auth == nil || auth.Disabled || !strings.EqualFold(auth.Provider, provider) {
@@ -223,4 +229,54 @@ func (m *Manager) RoutingQueue(provider string, now time.Time) []RoutingCandidat
 		queue = append(queue, candidate)
 	}
 	return queue
+}
+
+// The same decision function and comparator power real routing and its explanation.
+// Queue is provider-wide; model support, credential priority and request eligibility
+// can narrow the candidates for a particular request.
+func (m *Manager) adaptiveRoutingQueue(home, provider string, now time.Time) []RoutingCandidate {
+	selector := &AdaptiveReserveSelector{HomeAccount: home, history: m.adaptiveHistory}
+	ranks := []adaptiveRank{}
+	for _, a := range m.List() {
+		if a == nil || a.Disabled || !strings.EqualFold(a.Provider, provider) {
+			continue
+		}
+		ranks = append(ranks, adaptiveRank{a, selector.decision(a, now)})
+	}
+	unavailable := func(a *Auth) bool { return a.Unavailable && a.NextRetryAfter.After(now) }
+	sort.SliceStable(ranks, func(i, j int) bool {
+		x, y := unavailable(ranks[i].auth), unavailable(ranks[j].auth)
+		if x != y {
+			return !x
+		}
+		return adaptiveLess(ranks[i], ranks[j])
+	})
+	result := make([]RoutingCandidate, 0, len(ranks))
+	for i, r := range ranks {
+		d := r.decision
+		blocked := unavailable(r.auth)
+		if blocked {
+			d.Reason = "cooldown"
+		} else if i == 0 {
+			if !d.Eligible {
+				d.Reason = "fallback"
+			} else if d.Home {
+				d.Reason = "home"
+			} else {
+				d.Reason = "surplus_selected"
+			}
+		}
+		c := RoutingCandidate{Auth: r.auth.ID, Known: d.Short != nil && d.Long != nil, Saturated: !d.Eligible, Unavailable: blocked, Adaptive: d}
+		if d.Short != nil {
+			c.ShortUsage = d.Short.Used
+		}
+		if d.Long != nil {
+			c.LongReset = d.Long.Reset
+		}
+		if blocked {
+			c.RetryAfter = r.auth.NextRetryAfter
+		}
+		result = append(result, c)
+	}
+	return result
 }

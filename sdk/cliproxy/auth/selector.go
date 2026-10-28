@@ -1196,13 +1196,25 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		s.cache.setSessionAliases(authID, bindingProvider, primaryID, keys...)
 	}
 
-	// drain moves a session off a bound credential that soonest-reset considers nearly full.
+	// drain leaves a threatened quota reserve only when a safe alternative exists.
 	drain := func(bound *Auth, reason string) *Auth {
-		if _, ok := s.fallback.(*SoonestResetSelector); !ok || !soonestResetDraining(bound, now) {
+		var safe func(*Auth) bool
+		switch fallback := s.fallback.(type) {
+		case *SoonestResetSelector:
+			if !soonestResetDraining(bound, now) {
+				return nil
+			}
+			safe = func(a *Auth) bool { return !rankSoonestReset(a, 0, now).saturated }
+		case *AdaptiveReserveSelector:
+			if !strings.EqualFold(bound.Provider, "claude") || !fallback.decision(bound, now).Draining {
+				return nil
+			}
+			safe = func(a *Auth) bool { return fallback.decision(a, now).Eligible }
+		default:
 			return nil
 		}
 		auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
-		if errPick != nil || auth == nil || auth.ID == bound.ID || rankSoonestReset(auth, 0, now).saturated {
+		if errPick != nil || auth == nil || auth.ID == bound.ID || !safe(auth) {
 			return nil
 		}
 		bind(auth.ID, true)
