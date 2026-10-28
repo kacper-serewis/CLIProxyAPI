@@ -84,7 +84,7 @@ func parseAdaptiveUsage(reader io.Reader, now time.Time) (map[string]string, boo
 		Utilization *float64   `json:"utilization"`
 		ResetsAt    *time.Time `json:"resets_at"`
 	}
-	var payload map[string]*window
+	var payload map[string]json.RawMessage
 	if json.NewDecoder(reader).Decode(&payload) != nil {
 		return nil, false
 	}
@@ -93,8 +93,9 @@ func parseAdaptiveUsage(reader io.Reader, now time.Time) (map[string]string, boo
 		key, name string
 		duration  time.Duration
 	}{{"five_hour", "5h", 5 * time.Hour}, {"seven_day", "7d", 7 * 24 * time.Hour}} {
-		w, present := payload[spec.key]
-		if !present {
+		raw, present := payload[spec.key]
+		var w *window
+		if !present || json.Unmarshal(raw, &w) != nil {
 			return nil, false
 		}
 		used, reset := 0.0, now.Add(spec.duration)
