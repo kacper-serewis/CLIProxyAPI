@@ -748,6 +748,7 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.mu.Unlock()
 		return
 	}
+	attachAdaptiveHistory(selector, m.adaptiveHistory)
 	m.selector = selector
 	m.mu.Unlock()
 
