@@ -1196,9 +1196,26 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		s.cache.setSessionAliases(authID, bindingProvider, primaryID, keys...)
 	}
 
+	// drain moves a session off a bound credential that soonest-reset considers nearly full.
+	drain := func(bound *Auth, reason string) *Auth {
+		if _, ok := s.fallback.(*SoonestResetSelector); !ok || !soonestResetDraining(bound, now) {
+			return nil
+		}
+		auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		if errPick != nil || auth == nil || auth.ID == bound.ID || rankSoonestReset(auth, 0, now).saturated {
+			return nil
+		}
+		bind(auth.ID, true)
+		entry.Infof("session-affinity: %s auth nearly exhausted, drained | session=%s from_auth=%s auth=%s provider=%s model=%s", reason, truncateSessionID(primaryID), bound.ID, auth.ID, provider, model)
+		return auth
+	}
+
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if drained := drain(auth, "cache hit but"); drained != nil {
+					return drained, nil
+				}
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
@@ -1237,6 +1254,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if parentAuthID := s.cache.latestSessionAuth(fallbackID, providers); parentAuthID != "" {
 			for _, auth := range available {
 				if auth.ID == parentAuthID {
+					if drained := drain(auth, "guardian parent"); drained != nil {
+						return drained, nil
+					}
 					bind(auth.ID, true)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
@@ -1250,6 +1270,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				if auth.ID == cachedAuthID {
 					if !isSubagent || s.subagentAffinity {
+						if drained := drain(auth, "fallback"); drained != nil {
+							return drained, nil
+						}
 						bind(auth.ID, true)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)

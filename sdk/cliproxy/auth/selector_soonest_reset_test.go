@@ -158,3 +158,67 @@ func TestSoonestResetSelectorKeepsSessionAffinityBinding(t *testing.T) {
 		t.Fatalf("new session = %q, want late", got)
 	}
 }
+
+// Established sessions and new subagents leave a credential whose short window is nearly
+// full, so people sharing that account keep some headroom. Below the drain threshold the
+// binding stays put to keep the prompt cache warm.
+func TestSoonestResetSelectorDrainsNearlyExhaustedBinding(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &SoonestResetSelector{},
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	now := time.Now()
+	pick := func(session, agent string, auths ...*Auth) string {
+		t.Helper()
+		headers := map[string][]string{"X-Claude-Code-Session-Id": {session}}
+		if agent != "" {
+			headers["X-Claude-Code-Agent-Id"] = []string{agent}
+		}
+		opts := cliproxyexecutor.Options{Headers: headers, Metadata: make(map[string]any)}
+		picked, err := selector.Pick(context.Background(), "claude", "claude-sonnet-5-5", opts, auths)
+		if err != nil {
+			t.Fatalf("Pick(%s/%s) error = %v", session, agent, err)
+		}
+		return picked.ID
+	}
+
+	shared := claudeQuotaAuth("shared", now, time.Hour, 0.40, 0.50)
+	other := claudeQuotaAuth("other", now, 2*24*time.Hour, 0.40, 0.10)
+	if got := pick("sess-1", "", shared, other); got != "shared" {
+		t.Fatalf("cold bind = %q, want shared", got)
+	}
+
+	// Past the new-session threshold but below the drain threshold: the session stays.
+	warm := claudeQuotaAuth("shared", now, time.Hour, 0.40, 0.85)
+	if got := pick("sess-1", "", warm, other); got != "shared" {
+		t.Fatalf("session at 85%% moved to %q, want shared", got)
+	}
+	if got := pick("sess-2", "", warm, other); got != "other" {
+		t.Fatalf("new session at 85%% = %q, want other", got)
+	}
+
+	// Past the drain threshold: subagents and the session itself move and stay moved.
+	full := claudeQuotaAuth("shared", now, time.Hour, 0.40, 0.92)
+	if got := pick("sess-1", "sub-1", full, other); got != "other" {
+		t.Fatalf("subagent of drained parent = %q, want other", got)
+	}
+	if got := pick("sess-1", "", full, other); got != "other" {
+		t.Fatalf("drained session = %q, want other", got)
+	}
+	recovered := claudeQuotaAuth("shared", now, time.Hour, 0.40, 0.10)
+	if got := pick("sess-1", "", recovered, other); got != "other" {
+		t.Fatalf("drained session moved back to %q, want other", got)
+	}
+
+	// With nowhere better to go the binding is kept.
+	busy := claudeQuotaAuth("other", now, 2*24*time.Hour, 0.40, 0.95)
+	if got := pick("sess-3", "", full, busy); got != "shared" && got != "other" {
+		t.Fatalf("unexpected pick %q", got)
+	}
+	stay := pick("sess-3", "", full, busy)
+	if got := pick("sess-3", "", full, busy); got != stay {
+		t.Fatalf("binding moved between two full credentials: %q -> %q", stay, got)
+	}
+}
