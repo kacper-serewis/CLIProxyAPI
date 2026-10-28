@@ -13,8 +13,14 @@ import (
 
 const (
 	// soonestResetShortWindowSaturation demotes a credential whose short (5h) window is
-	// nearly used up, so a new session does not bind to it only to fail over shortly after.
-	soonestResetShortWindowSaturation = 0.90
+	// getting full, so a new session does not bind to it only to fail over shortly after.
+	// The credentials are shared with people who cannot switch accounts, so new sessions
+	// leave headroom for them.
+	soonestResetShortWindowSaturation = 0.80
+	// soonestResetShortWindowDrain moves established sessions off a credential whose short
+	// window is this full, before it hits the limit. Each moved session rebuilds its prompt
+	// cache once on the new credential.
+	soonestResetShortWindowDrain = 0.90
 	// soonestResetLongWindowSaturation demotes a credential whose long (weekly) window is
 	// effectively exhausted.
 	soonestResetLongWindowSaturation = 0.97
@@ -100,6 +106,15 @@ func soonestResetLess(a, b soonestResetRank) bool {
 }
 
 func rankSoonestReset(auth *Auth, index int, now time.Time) soonestResetRank {
+	return rankSoonestResetWith(auth, index, now, soonestResetShortWindowSaturation)
+}
+
+// soonestResetDraining reports whether established sessions should leave the credential.
+func soonestResetDraining(auth *Auth, now time.Time) bool {
+	return rankSoonestResetWith(auth, 0, now, soonestResetShortWindowDrain).saturated
+}
+
+func rankSoonestResetWith(auth *Auth, index int, now time.Time, shortSaturation float64) soonestResetRank {
 	rank := soonestResetRank{auth: auth, index: index}
 	if auth == nil || len(auth.Quota.Signals) == 0 {
 		return rank
@@ -134,7 +149,7 @@ func rankSoonestReset(auth *Auth, index int, now time.Time) soonestResetRank {
 	}
 	if short != nil {
 		rank.shortUsage = short.usage
-		if short.rejected || short.usage >= soonestResetShortWindowSaturation {
+		if short.rejected || short.usage >= shortSaturation {
 			rank.saturated = true
 		}
 	}
