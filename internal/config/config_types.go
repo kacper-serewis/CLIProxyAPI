@@ -457,8 +457,11 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "soonest-reset".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "soonest-reset", "adaptive-reserve".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// HomeAccount is the exact credential ID or email preferred by adaptive-reserve.
+	HomeAccount string `yaml:"home-account,omitempty" json:"home-account,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,

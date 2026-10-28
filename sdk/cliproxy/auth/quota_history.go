@@ -35,7 +35,7 @@ const (
 // [0, 1]; reset values are unix seconds. The long window is Claude's 7d window or the
 // longer Codex window; the short window is Claude's 5h window or the shorter Codex one.
 // Observed is when the provider last reported these values (unix seconds; the quota only
-// updates on traffic through this proxy), At is when the point was recorded.
+// updates from proxy traffic or adaptive usage polling), At is when the point was recorded.
 type QuotaHistoryPoint struct {
 	At         int64   `json:"t"`
 	Observed   int64   `json:"observed,omitempty"`
@@ -61,10 +61,15 @@ func (m *Manager) StartQuotaHistory(ctx context.Context, path string) {
 	}
 	go func() {
 		last := pruneQuotaHistory(path, time.Now())
+		history, _ := ReadQuotaHistory(path, time.Now().Add(-quotaHistoryRetention).Unix())
+		m.adaptiveHistory.add(history, time.Now())
+		m.startAdaptiveQuotaPolling(ctx)
 		ticker := time.NewTicker(quotaHistorySampleInterval)
 		defer ticker.Stop()
 		for {
-			appendQuotaHistory(path, sampleQuotaHistory(m.List(), last, time.Now()))
+			points := sampleQuotaHistory(m.List(), last, time.Now())
+			m.adaptiveHistory.add(points, time.Now())
+			appendQuotaHistory(path, points)
 			select {
 			case <-ctx.Done():
 				return
@@ -123,6 +128,12 @@ func quotaHistoryPointFor(auth *Auth, now time.Time) (QuotaHistoryPoint, bool) {
 			point.ShortUsed = roundQuotaUsage(w.usage)
 			point.ShortReset = w.reset.Unix()
 		}
+	}
+	if auth.Quota.Signals["Adaptive-5h-Inactive"] == "true" {
+		point.ShortReset = 0
+	}
+	if auth.Quota.Signals["Adaptive-7d-Inactive"] == "true" {
+		point.LongReset = 0
 	}
 	return point, hasLong
 }
