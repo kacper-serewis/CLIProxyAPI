@@ -154,6 +154,23 @@ func TestAdaptiveReserveAffinityStaysUntilReserveThreatened(t *testing.T) {
 	}
 }
 
+func TestAdaptiveReserveAppliesToMixedClaudeCandidates(t *testing.T) {
+	now := time.Now()
+	s := &AdaptiveReserveSelector{HomeAccount: "home"}
+	home := claudeQuotaAuth("home", now, 3*24*time.Hour, 0.4, 0)
+	team := claudeQuotaAuth("team", now, 16*time.Hour, 0.86, 0.26)
+	a, err := s.Pick(context.Background(), "mixed", "claude-opus-5-5", cliproxyexecutor.Options{}, []*Auth{team, home})
+	if err != nil || a.ID != "home" {
+		t.Fatalf("mixed Claude pick must use adaptive ranking, got %v err=%v", a, err)
+	}
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: s, TTL: time.Hour})
+	defer affinity.Stop()
+	a, err = affinity.Pick(context.Background(), "mixed", "claude-opus-5-5", claudeCodeOpts("chat", ""), []*Auth{team, home})
+	if err != nil || a.ID != "home" {
+		t.Fatalf("new mixed chat must not take the reserved account, got %v err=%v", a, err)
+	}
+}
+
 func TestAdaptiveReserveQueueMatchesSelectionAndCooldown(t *testing.T) {
 	now := time.Now()
 	selector := &AdaptiveReserveSelector{HomeAccount: "home"}
