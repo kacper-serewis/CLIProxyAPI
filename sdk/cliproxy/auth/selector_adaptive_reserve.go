@@ -297,8 +297,25 @@ func adaptiveLess(a, b adaptiveRank) bool {
 	return a.auth.ID < b.auth.ID
 }
 
+// adaptiveClaudePick reports whether a pick is for Claude. Session affinity
+// schedules across providers as "mixed", so the candidates decide then.
+func adaptiveClaudePick(provider string, auths []*Auth) bool {
+	if strings.EqualFold(provider, "claude") {
+		return true
+	}
+	if !strings.EqualFold(provider, "mixed") || len(auths) == 0 {
+		return false
+	}
+	for _, a := range auths {
+		if a == nil || !strings.EqualFold(a.Provider, "claude") {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *AdaptiveReserveSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	if !strings.EqualFold(provider, "claude") {
+	if !adaptiveClaudePick(provider, auths) {
 		return (&SoonestResetSelector{}).Pick(ctx, provider, model, opts, auths)
 	}
 	now := time.Now()
