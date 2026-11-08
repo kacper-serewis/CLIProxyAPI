@@ -26,7 +26,7 @@ func (m *Manager) startAdaptiveQuotaPolling(ctx context.Context) {
 		defer ticker.Stop()
 		for {
 			cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-			if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.Routing.Strategy), "adaptive-reserve") {
+			if cfg != nil && pollsClaudeUsage(cfg.Routing.Strategy) {
 				for _, a := range m.List() {
 					if a.Disabled || !strings.EqualFold(a.Provider, "claude") || a.AuthKind() == AuthKindAPIKey {
 						continue
@@ -47,6 +47,16 @@ func (m *Manager) startAdaptiveQuotaPolling(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// pollsClaudeUsage reports whether the strategy ranks Claude credentials by quota, so
+// usage made outside the proxy (claude.ai, other clients) is seen within two minutes.
+func pollsClaudeUsage(strategy string) bool {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "adaptive-reserve", "soonest-reset":
+		return true
+	}
+	return false
 }
 
 func (m *Manager) pollAdaptiveQuota(ctx context.Context, a *Auth) {

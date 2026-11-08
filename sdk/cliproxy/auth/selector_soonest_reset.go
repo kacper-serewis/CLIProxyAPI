@@ -13,17 +13,16 @@ import (
 
 const (
 	// soonestResetShortWindowSaturation demotes a credential whose short (5h) window is
-	// getting full, so a new session does not bind to it only to fail over shortly after.
-	// The credentials are shared with people who cannot switch accounts, so new sessions
-	// leave headroom for them.
-	soonestResetShortWindowSaturation = 0.80
+	// nearly full, so a new session does not bind to it only to fail over shortly after.
+	// The credentials are used by one person, so little headroom is kept back.
+	soonestResetShortWindowSaturation = 0.90
 	// soonestResetShortWindowDrain moves established sessions off a credential whose short
-	// window is this full, before it hits the limit. Each moved session rebuilds its prompt
-	// cache once on the new credential.
-	soonestResetShortWindowDrain = 0.90
+	// window is this full, before it hits the limit, when a safe alternative exists. Each
+	// moved session rebuilds its prompt cache once on the new credential.
+	soonestResetShortWindowDrain = 0.95
 	// soonestResetLongWindowSaturation demotes a credential whose long (weekly) window is
 	// effectively exhausted.
-	soonestResetLongWindowSaturation = 0.97
+	soonestResetLongWindowSaturation = 0.99
 	// soonestResetTieBucket groups long-window resets that are this close together so the
 	// short-window utilization can break the tie.
 	soonestResetTieBucket = time.Minute
