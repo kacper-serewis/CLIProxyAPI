@@ -67,7 +67,7 @@ func TestSoonestResetSelectorTreatsRolledOverWindowAsUnobserved(t *testing.T) {
 func TestSoonestResetSelectorDemotesSaturatedWindows(t *testing.T) {
 	now := time.Now()
 	shortFull := claudeQuotaAuth("short-full", now, 10*time.Hour, 0.30, 0.95)
-	longFull := claudeQuotaAuth("long-full", now, 12*time.Hour, 0.98, 0.10)
+	longFull := claudeQuotaAuth("long-full", now, 12*time.Hour, 0.99, 0.10)
 	rejected := claudeQuotaAuth("rejected", now, 14*time.Hour, 0.30, 0.10)
 	rejected.Quota.Signals["Anthropic-Ratelimit-Unified-5h-Status"] = "rejected"
 	ok := claudeQuotaAuth("ok", now, 5*24*time.Hour, 0.30, 0.10)
@@ -191,16 +191,16 @@ func TestSoonestResetSelectorDrainsNearlyExhaustedBinding(t *testing.T) {
 	}
 
 	// Past the new-session threshold but below the drain threshold: the session stays.
-	warm := claudeQuotaAuth("shared", now, time.Hour, 0.40, 0.85)
+	warm := claudeQuotaAuth("shared", now, time.Hour, 0.40, 0.92)
 	if got := pick("sess-1", "", warm, other); got != "shared" {
-		t.Fatalf("session at 85%% moved to %q, want shared", got)
+		t.Fatalf("session at 92%% moved to %q, want shared", got)
 	}
 	if got := pick("sess-2", "", warm, other); got != "other" {
-		t.Fatalf("new session at 85%% = %q, want other", got)
+		t.Fatalf("new session at 92%% = %q, want other", got)
 	}
 
 	// Past the drain threshold: subagents and the session itself move and stay moved.
-	full := claudeQuotaAuth("shared", now, time.Hour, 0.40, 0.92)
+	full := claudeQuotaAuth("shared", now, time.Hour, 0.40, 0.97)
 	if got := pick("sess-1", "sub-1", full, other); got != "other" {
 		t.Fatalf("subagent of drained parent = %q, want other", got)
 	}
@@ -213,12 +213,40 @@ func TestSoonestResetSelectorDrainsNearlyExhaustedBinding(t *testing.T) {
 	}
 
 	// With nowhere better to go the binding is kept.
-	busy := claudeQuotaAuth("other", now, 2*24*time.Hour, 0.40, 0.95)
+	busy := claudeQuotaAuth("other", now, 2*24*time.Hour, 0.40, 0.97)
 	if got := pick("sess-3", "", full, busy); got != "shared" && got != "other" {
 		t.Fatalf("unexpected pick %q", got)
 	}
 	stay := pick("sess-3", "", full, busy)
 	if got := pick("sess-3", "", full, busy); got != stay {
 		t.Fatalf("binding moved between two full credentials: %q -> %q", stay, got)
+	}
+}
+
+func TestSoonestResetKeepsHeadroomForOneUser(t *testing.T) {
+	now := time.Now()
+	// A single user's credentials are used up to 90% short / 99% weekly before new
+	// sessions avoid them, and established sessions drain only at 95% short.
+	if rankSoonestReset(claudeQuotaAuth("a", now, time.Hour, 0.98, 0.89), 0, now).saturated {
+		t.Fatal("credential at 89% short / 98% weekly was demoted")
+	}
+	if !rankSoonestReset(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.90), 0, now).saturated {
+		t.Fatal("credential at 90% short was not demoted for new sessions")
+	}
+	if soonestResetDraining(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.94), now) {
+		t.Fatal("credential at 94% short drained established sessions")
+	}
+	if !soonestResetDraining(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.95), now) {
+		t.Fatal("credential at 95% short did not drain established sessions")
+	}
+}
+
+func TestClaudeUsagePollingRunsForQuotaStrategies(t *testing.T) {
+	for strategy, want := range map[string]bool{
+		"adaptive-reserve": true, " Soonest-Reset ": true, "fill-first": false, "round-robin": false, "": false,
+	} {
+		if got := pollsClaudeUsage(strategy); got != want {
+			t.Errorf("pollsClaudeUsage(%q) = %t, want %t", strategy, got, want)
+		}
 	}
 }
