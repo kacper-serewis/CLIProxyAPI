@@ -6,10 +6,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
+
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -149,15 +150,15 @@ func routingSessionTitle(payload []byte) string {
 	}
 	// Anthropic messages and OpenAI chat use "messages"; the Responses API uses "input".
 	for _, path := range []string{"messages", "input"} {
-		gjson.GetBytes(payload, path).ForEach(func(_, message gjson.Result) bool {
+		ojson.GetBytes(payload, path).ForEach(func(_, message ojson.Result) bool {
 			if message.Get("role").String() != "user" {
 				return true
 			}
 			content := message.Get("content")
-			if content.Type == gjson.String {
+			if content.Type == ojson.String {
 				return !consider(content.String())
 			}
-			content.ForEach(func(_, block gjson.Result) bool {
+			content.ForEach(func(_, block ojson.Result) bool {
 				return !consider(block.Get("text").String())
 			})
 			return title == ""
