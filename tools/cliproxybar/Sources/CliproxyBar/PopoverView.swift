@@ -55,7 +55,8 @@ struct PoolSection: View {
                                burnLabel: "last hour", detail: nil)
             }
             if let long = pool.long {
-                PoolWindowView(title: "Weekly", window: long, now: now, burnLabel: "24h avg",
+                PoolWindowView(title: "Weekly", window: long, now: now,
+                               burnLabel: long.learned ? "usual week" : "24h avg",
                                detail: String(format: "last 5h: %.1f pts/h", pool.longBurnRecent))
             }
             ForEach(pool.accounts) { AccountView(account: $0, now: now) }
@@ -94,7 +95,7 @@ struct PoolWindowView: View {
 
     private var verdict: String {
         if let empty = window.emptyAt {
-            return "At this pace the pool runs out \(when(empty, now: now))"
+            return "\(window.learned ? "At your usual rhythm" : "At this pace") the pool runs out \(when(empty, now: now))"
         }
         return "Lasts until the resets — lowest point \(pct(window.lowestLeft)) left"
     }
@@ -140,7 +141,7 @@ struct AccountView: View {
             HStack {
                 Text(w.resetAt.map { "resets \(when($0, now: now))" } ?? "idle — starts on next use")
                 Spacer()
-                if let projected, w.burnPerHour > 0 {
+                if let projected, projected >= w.used + 0.5 {
                     Text("→ \(pct(min(projected, 999))) at reset").foregroundStyle(level == .ok ? .secondary : level.color)
                 }
             }

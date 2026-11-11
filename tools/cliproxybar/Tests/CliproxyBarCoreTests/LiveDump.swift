@@ -6,7 +6,7 @@ import Testing
     for p in ProxyFiles.load() {
         print("POOL", p.provider, "age", Int(p.dataAge), "level", p.level)
         for (n, w) in [("short", p.short), ("long", p.long)] {
-            if let w { print("  ", n, String(format: "used %.1f burn %.2f sust %.2f pace %.2f lowest %.1f", w.used, w.burnPerHour, w.sustainablePerHour, w.pace, w.lowestLeft), w.emptyAt as Any, w.level) }
+            if let w { print("  ", n, String(format: "used %.1f burn %.2f sust %.2f pace %.2f lowest %.1f", w.used, w.burnPerHour, w.sustainablePerHour, w.pace, w.lowestLeft), w.emptyAt as Any, w.level, w.learned ? "learned" : "constant") }
         }
         for a in p.accounts {
             print("  ", a.name, a.nextChat ? "[next]" : "",
