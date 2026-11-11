@@ -124,13 +124,16 @@ private func rhythm(_ auth: String, from: Int, to: Int, perHour: Double = 1, res
     // 4 pts/h at 22:00, when nothing is expected: a short session, not a busy night.
     let late = QuotaModel.projectedRate(profile, recentBurn: 4, recentHours: 1, now: now, calendar: utc)
     #expect(abs(late(now) - 4) < 1e-9)
-    #expect(abs(late(now.addingTimeInterval(3600)) - 2) < 1e-9)
-    #expect(late(date(12, 3)) < 0.2)
+    #expect(abs(late(now.addingTimeInterval(1800)) - 2) < 1e-9)
+    #expect(late(date(12, 3)) < 0.01)
     #expect(abs(late(date(13, 13)) - 1) < 0.05)
     // Twice the usual pace at 13:00 scales the rhythm and fades.
     let busy = QuotaModel.projectedRate(profile, recentBurn: 2, recentHours: 1, now: date(11, 13), calendar: utc)
-    #expect(abs(busy(date(11, 16)) - 1.5 * profile.weekday[16]) < 1e-9)
-    #expect(busy(date(12, 3)) == 0)
+    #expect(abs(busy(Date(timeIntervalSince1970: at(11, 14, 30))) - 1.5 * profile.weekday[14]) < 1e-9)
+    // Four times the usual counts as twice; the rest is a session that is gone in three hours.
+    let wild = QuotaModel.projectedRate(profile, recentBurn: 4, recentHours: 1, now: date(11, 13), calendar: utc)
+    #expect(abs(wild(date(11, 16)) - (1.25 * profile.weekday[16] + 2.0 / 64)) < 1e-9)
+    #expect(busy(date(12, 3)) < 1e-9)
 
     // 10 points left, reset far away: a constant 1 pt/h would empty it at 08:00, the rhythm
     // keeps it through the night and into the next working day.
@@ -162,15 +165,14 @@ private func rhythm(_ auth: String, from: Int, to: Int, perHour: Double = 1, res
     func date(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date { Date(timeIntervalSince1970: at(day, hour, minute)) }
     let scale = 8.0  // one weekly point costs eight 5h points
 
-    // Mid-afternoon at twice the usual: starts at the current burn and stays well above the
-    // rhythm an hour and a half later.
+    // Mid-afternoon at twice the usual: starts at the current burn; an hour on, half of it is
+    // the current burn and half the (busier than usual) rhythm.
     let busy = QuotaModel.reactiveRate(profile, scale: scale, recentBurn: 16, recentHours: 1, now: date(11, 13), calendar: utc)
     #expect(abs(busy(date(11, 13)) - 16) < 1e-9)
-    #expect(busy(date(11, 14, 30)) > 13)
-    // The weekly-style rate would have dropped a late session to half within the hour; here
-    // half is still there after an hour and a half, and it winds down into the night.
+    #expect(busy(date(11, 14)) > 8 + 0.5 * 8 * profile.weekday[14])
+    // A late session: half is still there after an hour, and it winds down into the night.
     let late = QuotaModel.reactiveRate(profile, scale: scale, recentBurn: 16, recentHours: 1, now: date(11, 22), calendar: utc)
-    #expect(abs(late(date(11, 23, 30)) - 8) < 1e-9)
+    #expect(abs(late(date(11, 23)) - 8) < 1e-9)
     #expect(late(date(12, 3)) < 2)
     // Idle before work: the working morning still shows up.
     let idle = QuotaModel.reactiveRate(profile, scale: scale, recentBurn: 0, recentHours: 1, now: date(12, 6), calendar: utc)
@@ -235,6 +237,50 @@ private func rhythm(_ auth: String, from: Int, to: Int, perHour: Double = 1, res
     let short = try #require(pool.accounts[0].short)
     #expect(abs(short.burnPerHour - 10) < 1e-9)
     let projected = try #require(short.projectedAtReset)
-    // 12 used + 10 pts/h halving every 1.5h over 4h ≈ 12 + 18.2
-    #expect(projected > 28 && projected < 33)
+    // 12 used + 10 pts/h halving every hour over 4h ≈ 12 + 13.5
+    #expect(projected > 24 && projected < 28)
+}
+
+@Test func accountRowIsOnlyAsAlarmingAsItsPool() {
+    let full = WindowState(used: 60, resetAt: nil, period: 1, burnPerHour: 1, projectedAtReset: 100)
+    // Filling up before the reset is fine while the pool lasts: the router moves on.
+    #expect(QuotaModel.accountLevel(full, pool: .ok) == .ok)
+    #expect(QuotaModel.accountLevel(full, pool: .watch) == .watch)
+    #expect(QuotaModel.accountLevel(full, pool: .over) == .over)
+    let calm = WindowState(used: 20, resetAt: nil, period: 1, burnPerHour: 1, projectedAtReset: 40)
+    #expect(QuotaModel.accountLevel(calm, pool: .over) == .ok)
+    // Without fresh data the account's own outlook is all there is.
+    #expect(QuotaModel.accountLevel(full, pool: .stale) == .over)
+}
+
+@Test func alertsOnceWhenAPoolKeepsRunningOut() {
+    let start = Date(timeIntervalSince1970: 1_000_000)
+    func pool(shortEmpty: Date?, age: TimeInterval = 0) -> PoolState {
+        PoolState(provider: "claude", accounts: [],
+                  short: PoolWindow(used: 80, burnPerHour: 30, burnWindowHours: 1, sustainablePerHour: 20,
+                                    emptyAt: shortEmpty, lowestLeft: 0, level: shortEmpty == nil ? .ok : .over),
+                  long: nil, longBurnRecent: 0, dataAge: age)
+    }
+    let empty = start.addingTimeInterval(3600)
+    var alerter = PoolAlerter()
+    // A blip is not an alert: it has to hold for a couple of minutes.
+    #expect(alerter.check([pool(shortEmpty: empty)], now: start).isEmpty)
+    #expect(alerter.check([pool(shortEmpty: nil)], now: start.addingTimeInterval(30)).isEmpty)
+    #expect(alerter.check([pool(shortEmpty: empty)], now: start.addingTimeInterval(60)).isEmpty)
+    let alerts = alerter.check([pool(shortEmpty: empty)], now: start.addingTimeInterval(200))
+    #expect(alerts == [PoolAlert(key: "claude.short", provider: "claude", short: true, emptyAt: empty)])
+    // Not again while it lasts, nor when it comes back within the window's cooldown.
+    #expect(alerter.check([pool(shortEmpty: empty)], now: start.addingTimeInterval(400)).isEmpty)
+    #expect(alerter.check([pool(shortEmpty: nil)], now: start.addingTimeInterval(500)).isEmpty)
+    #expect(alerter.check([pool(shortEmpty: empty)], now: start.addingTimeInterval(600)).isEmpty)
+    #expect(alerter.check([pool(shortEmpty: empty)], now: start.addingTimeInterval(900)).isEmpty)
+    // After the cooldown it may alert again, and stale data never does.
+    let later = start.addingTimeInterval(6 * 3600)
+    #expect(alerter.check([pool(shortEmpty: empty, age: 3600)], now: later).isEmpty)
+    #expect(alerter.check([pool(shortEmpty: empty)], now: later.addingTimeInterval(30)).isEmpty)
+    #expect(alerter.check([pool(shortEmpty: empty)], now: later.addingTimeInterval(200)).count == 1)
+    // The last alert times survive a restart.
+    var restarted = PoolAlerter(lastSent: alerter.lastSent)
+    #expect(restarted.check([pool(shortEmpty: empty)], now: later.addingTimeInterval(300)).isEmpty)
+    #expect(restarted.check([pool(shortEmpty: empty)], now: later.addingTimeInterval(500)).isEmpty)
 }

@@ -60,7 +60,10 @@ struct PoolSection: View {
                                burnLabel: long.learned ? "usual week" : "24h avg",
                                detail: String(format: "last 5h: %.1f pts/h", pool.longBurnRecent))
             }
-            ForEach(pool.accounts) { AccountView(account: $0, now: now) }
+            ForEach(pool.accounts) {
+                AccountView(account: $0, now: now, shortPool: pool.short?.level ?? pool.level,
+                            longPool: pool.long?.level ?? pool.level)
+            }
         }
     }
 
@@ -112,6 +115,9 @@ struct PoolWindowView: View {
 struct AccountView: View {
     let account: AccountState
     let now: Date
+    /// The pool's verdict for each window: a row is never more alarming than its pool.
+    let shortPool: Level
+    let longPool: Level
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -124,16 +130,16 @@ struct AccountView: View {
                 }
                 Spacer()
             }
-            if let s = account.short { row("5h", s) }
-            if let l = account.long { row("Week", l) }
+            if let s = account.short { row("5h", s, pool: shortPool) }
+            if let l = account.long { row("Week", l, pool: longPool) }
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
     }
 
-    private func row(_ label: String, _ w: WindowState) -> some View {
+    private func row(_ label: String, _ w: WindowState, pool: Level) -> some View {
         let projected = w.projectedAtReset
-        let level: Level = (projected ?? 0) >= 100 ? .over : (w.used >= 90 || (projected ?? 0) >= 90 ? .watch : .ok)
+        let level = QuotaModel.accountLevel(w, pool: pool)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(label).font(.caption).frame(width: 34, alignment: .leading)
@@ -144,7 +150,9 @@ struct AccountView: View {
                 Text(w.resetAt.map { "resets \(when($0, now: now))" } ?? "idle — starts on next use")
                 Spacer()
                 if let projected, projected >= w.used + 0.5 {
-                    Text("→ \(pct(min(projected, 999))) at reset").foregroundStyle(level == .ok ? .secondary : level.color)
+                    // 100% with a healthy pool means the seat gets used up, not that work stops.
+                    Text(projected >= 100 ? "→ full before reset" : "→ \(pct(projected)) at reset")
+                        .foregroundStyle(level == .ok ? .secondary : level.color)
                 }
             }
             .font(.caption2).foregroundStyle(.secondary)

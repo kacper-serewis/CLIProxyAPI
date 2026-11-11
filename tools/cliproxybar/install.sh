@@ -18,7 +18,7 @@ cat > $APP/Contents/Info.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>local.cliproxybar</string>
+  <key>CFBundleIdentifier</key><string>local.cliproxybar.menu</string>
   <key>CFBundleName</key><string>CliproxyBar</string>
   <key>CFBundleExecutable</key><string>CliproxyBar</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -45,4 +45,10 @@ EOF
 launchctl bootout gui/$(id -u)/$LABEL 2>/dev/null || true
 for _ in {1..50}; do launchctl print gui/$(id -u)/$LABEL >/dev/null 2>&1 || break; sleep 0.1; done
 launchctl bootstrap gui/$(id -u) $PLIST
-echo "CliproxyBar installed and running ($APP)."
+# Notification permission can only be asked when the app is opened the normal way, not by
+# launchd. This is silent once the user has answered; the copy opened here quits by itself.
+if open -n -W -g -a $APP --args --request-notifications; then
+  echo "CliproxyBar installed and running ($APP)."
+else
+  echo "CliproxyBar installed and running ($APP). Notifications are off: allow them for CliproxyBar in System Settings > Notifications to be warned when a pool runs out."
+fi
