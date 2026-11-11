@@ -347,15 +347,21 @@ extension QuotaModel {
     static let minProfileHours = 48.0
     /// The level follows how the pool has been used lately, not how it was used a month ago.
     static let levelWindow: TimeInterval = 14 * 86400
+    // How the recent burn is blended into the rhythm. The values come from the panel's
+    // backtest on the recorded history (scripts/poolBacktest.ts, RATE_TUNING in
+    // quotaPoolModel.ts) and must stay the same as there: the rhythm carries the projection,
+    // the recent pace only nudges it.
     /// How fast "busier (or quieter) than usual right now" fades back to the learned rhythm.
-    static let recentHalfLife: TimeInterval = 3 * 3600
+    static let recentHalfLife: TimeInterval = 1.5 * 3600
+    /// The same for the 5h window, where a busy day stays busy for longer.
+    static let shortRecentHalfLife: TimeInterval = 6 * 3600
     /// The recent pace counts for at most this many times the usual pace.
-    static let maxRecentFactor = 4.0
+    static let maxRecentFactor = 2.0
     /// How long burn at a normally idle hour is assumed to carry on.
-    static let sessionHalfLife: TimeInterval = 3600
+    static let sessionHalfLife: TimeInterval = 1800
     /// 5h window: how long the current burn itself is assumed to carry on before the rhythm
-    /// takes over. Longer than a session blip, so the 5h outlook reacts to what is happening now.
-    static let currentHalfLife: TimeInterval = 1.5 * 3600
+    /// takes over.
+    static let currentHalfLife: TimeInterval = 3600
 
     /// Points one account used, as (time, points) at the sample that revealed them.
     /// Readings jitter by a point, so only a new high within a reset window counts. A 5h
@@ -433,7 +439,7 @@ extension QuotaModel {
             let elapsed = max(0, t.timeIntervalSince(now))
             let current = pow(0.5, elapsed / currentHalfLife)
             let rhythm = scale * profile.rate(at: t, calendar: calendar)
-                * (1 + (factor - 1) * pow(0.5, elapsed / recentHalfLife))
+                * (1 + (factor - 1) * pow(0.5, elapsed / shortRecentHalfLife))
             return current * recentBurn + (1 - current) * rhythm
         }
     }
@@ -525,6 +531,65 @@ extension QuotaModel {
             return profile.rate(at: t, calendar: calendar) * (1 + (factor - 1) * pow(0.5, elapsed / recentHalfLife))
                 + unexplained * pow(0.5, elapsed / sessionHalfLife)
         }
+    }
+}
+
+extension QuotaModel {
+    /// Colour of one account's window row. An account that fills up before its reset is only a
+    /// problem when the pool is: otherwise the router moves chats to another account. So the
+    /// row is never more alarming than its pool, unless the data is stale.
+    public static func accountLevel(_ window: WindowState, pool: Level) -> Level {
+        let projected = window.projectedAtReset ?? 0
+        let own: Level = projected >= 100 ? .over : (window.used >= 90 || projected >= 90 ? .watch : .ok)
+        return pool == .stale ? own : min(own, pool)
+    }
+}
+
+/// A pool that is projected to run dry, worth a notification.
+public struct PoolAlert: Equatable, Sendable {
+    /// "<provider>.short" or "<provider>.long".
+    public var key: String
+    public var provider: String
+    public var short: Bool
+    public var emptyAt: Date
+
+    public init(key: String, provider: String, short: Bool, emptyAt: Date) {
+        self.key = key; self.provider = provider; self.short = short; self.emptyAt = emptyAt
+    }
+}
+
+/// Decides when to notify: once a pool has been projected to run out for a couple of minutes,
+/// and then not again for that window until its cooldown has passed.
+public struct PoolAlerter: Sendable {
+    /// A projection that flips for one refresh is not worth a notification.
+    public static let holdFor: TimeInterval = 120
+    /// One alert per window: 5h for the 5-hour pool, a day for the weekly one.
+    public static func cooldown(short: Bool) -> TimeInterval { short ? 5 * 3600 : 24 * 3600 }
+
+    /// When each key was last alerted; persist it so a restart does not alert again.
+    public private(set) var lastSent: [String: Date]
+    private var overSince: [String: Date] = [:]
+
+    public init(lastSent: [String: Date] = [:]) { self.lastSent = lastSent }
+
+    public mutating func check(_ pools: [PoolState], now: Date) -> [PoolAlert] {
+        var alerts: [PoolAlert] = []
+        var over: Set<String> = []
+        for pool in pools where pool.level != .stale {
+            for (short, window) in [(true, pool.short), (false, pool.long)] {
+                guard let emptyAt = window?.emptyAt else { continue }
+                let key = "\(pool.provider).\(short ? "short" : "long")"
+                over.insert(key)
+                let since = overSince[key] ?? now
+                overSince[key] = since
+                guard now.timeIntervalSince(since) >= Self.holdFor else { continue }
+                if let last = lastSent[key], now.timeIntervalSince(last) < Self.cooldown(short: short) { continue }
+                lastSent[key] = now
+                alerts.append(PoolAlert(key: key, provider: pool.provider, short: short, emptyAt: emptyAt))
+            }
+        }
+        overSince = overSince.filter { over.contains($0.key) }
+        return alerts
     }
 }
 
