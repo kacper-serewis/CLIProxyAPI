@@ -52,7 +52,8 @@ struct PoolSection: View {
             }
             if let short = pool.short {
                 PoolWindowView(title: "5-hour", window: short, now: now,
-                               burnLabel: "last hour", detail: nil)
+                               burnLabel: "last hour", detail: nil,
+                               rhythmLead: "At this pace and your usual rhythm")
             }
             if let long = pool.long {
                 PoolWindowView(title: "Weekly", window: long, now: now,
@@ -79,6 +80,7 @@ struct PoolWindowView: View {
     let now: Date
     let burnLabel: String
     let detail: String?
+    var rhythmLead = "At your usual rhythm"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -95,7 +97,7 @@ struct PoolWindowView: View {
 
     private var verdict: String {
         if let empty = window.emptyAt {
-            return "\(window.learned ? "At your usual rhythm" : "At this pace") the pool runs out \(when(empty, now: now))"
+            return "\(window.learned ? rhythmLead : "At this pace") the pool runs out \(when(empty, now: now))"
         }
         return "Lasts until the resets — lowest point \(pct(window.lowestLeft)) left"
     }

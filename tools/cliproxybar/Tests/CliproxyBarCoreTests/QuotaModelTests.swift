@@ -154,3 +154,44 @@ private func rhythm(_ auth: String, from: Int, to: Int, perHour: Double = 1, res
     let projected = try #require(pool.accounts[0].long?.projectedAtReset)
     #expect(abs(projected - 78) < 1.5)
 }
+
+@Test func fiveHourRateLeansOnCurrentBurnThenFollowsTheRhythm() throws {
+    let learnedAt = Date(timeIntervalSince1970: at(11, 22))
+    let points = rhythm("a", from: 2, to: 11, reset: at(30, 0))
+    let profile = try #require(QuotaModel.learnProfile(shape: [points], pool: [points], now: learnedAt, calendar: utc))
+    func date(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date { Date(timeIntervalSince1970: at(day, hour, minute)) }
+    let scale = 8.0  // one weekly point costs eight 5h points
+
+    // Mid-afternoon at twice the usual: starts at the current burn and stays well above the
+    // rhythm an hour and a half later.
+    let busy = QuotaModel.reactiveRate(profile, scale: scale, recentBurn: 16, recentHours: 1, now: date(11, 13), calendar: utc)
+    #expect(abs(busy(date(11, 13)) - 16) < 1e-9)
+    #expect(busy(date(11, 14, 30)) > 13)
+    // The weekly-style rate would have dropped a late session to half within the hour; here
+    // half is still there after an hour and a half, and it winds down into the night.
+    let late = QuotaModel.reactiveRate(profile, scale: scale, recentBurn: 16, recentHours: 1, now: date(11, 22), calendar: utc)
+    #expect(abs(late(date(11, 23, 30)) - 8) < 1e-9)
+    #expect(late(date(12, 3)) < 2)
+    // Idle before work: the working morning still shows up.
+    let idle = QuotaModel.reactiveRate(profile, scale: scale, recentBurn: 0, recentHours: 1, now: date(12, 6), calendar: utc)
+    #expect(idle(date(12, 6)) == 0)
+    #expect(idle(date(12, 10)) > 4)
+}
+
+@Test func shortPerLongPointComparesBothWindows() throws {
+    // One weekly point per hour on a working day; the 5h window climbs 8 points per sample,
+    // across two 5h windows.
+    var points: [HistoryPoint] = []
+    for (i, hour) in (9..<17).enumerated() {
+        let window = hour < 14 ? at(11, 14) : at(11, 19)
+        let inWindow = Double(hour < 14 ? hour - 9 : hour - 14) + 1
+        points.append(HistoryPoint(t: at(11, hour, 30), auth: "a", long_used: Double(i + 1) / 100,
+                                   long_reset: at(30, 0), short_used: inWindow * 0.08, short_reset: window))
+    }
+    let now = Date(timeIntervalSince1970: at(11, 22))
+    // Weekly: 7 points after the first reading. 5h: 4 × 8 in the first window after its first
+    // reading, 3 × 8 in the second.
+    let k = try #require(QuotaModel.shortPerLongPoint([points], now: now))
+    #expect(abs(k - 56.0 / 7.0) < 1e-9)
+    #expect(QuotaModel.shortPerLongPoint([Array(points.prefix(3))], now: now) == nil)
+}
