@@ -59,8 +59,8 @@ public struct PoolWindow: Sendable {
     public var sustainablePerHour: Double
     /// When the pool runs dry, spending it the soonest-reset way. nil = it lasts.
     public var emptyAt: Date?
-    /// The projection follows the learned usage rhythm and `burnPerHour` is the usual week's
-    /// average; otherwise both are the constant recent burn.
+    /// The projection follows the learned usage rhythm instead of holding `burnPerHour`
+    /// constant. For the weekly window `burnPerHour` is then the usual week's average.
     public var learned = false
     /// Lowest pool level over the projection, 0...100 of capacity.
     public var lowestLeft: Double
@@ -264,9 +264,19 @@ public enum QuotaModel {
             if let long, long.window.learned {
                 for (k, i) in withLong.enumerated() { accts[i].long!.projectedAtReset = long.usedAtReset[k] }
             }
+            // The 5h window follows the same rhythm, converted to its own points, but leans on
+            // the last hour's burn. burnPerHour stays that last hour.
+            let shorts = accts.compactMap(\.short)
+            var shortRate: (@Sendable (Date) -> Double)?
+            if let profile, let scale = shortPerLongPoint(accts.map { byAuth[$0.id]! }, now: now) {
+                shortRate = reactiveRate(profile, scale: scale,
+                                         recentBurn: shorts.reduce(0) { $0 + $1.burnPerHour },
+                                         recentHours: shortBurnHours, now: now, calendar: calendar)
+            }
             pools.append(PoolState(provider: provider, accounts: accts,
-                                   short: poolWindow(accts.compactMap(\.short), burnHours: shortBurnHours,
-                                                     horizon: shortPeriod, watchBelow: 20, now: now)?.window,
+                                   short: poolWindow(shorts, burnHours: shortBurnHours,
+                                                     horizon: shortPeriod, watchBelow: 20, now: now,
+                                                     rate: shortRate)?.window,
                                    long: long?.window,
                                    longBurnRecent: recent,
                                    dataAge: n - newest))
@@ -283,9 +293,9 @@ public enum QuotaModel {
             SimAccount(remaining: 100 - $0.used, resetAt: $0.resetAt ?? now.addingTimeInterval($0.period), period: $0.period)
         }, rate: rate ?? { _ in burn }, now: now, horizon: horizon)
         let level: Level = sim.emptyAt != nil ? .over : (sim.lowestLeft < watchBelow ? .watch : .ok)
-        let learned = rate != nil && typicalPerHour != nil
+        let learned = rate != nil
         return (PoolWindow(used: windows.reduce(0) { $0 + $1.used } / Double(windows.count),
-                           burnPerHour: learned ? typicalPerHour! : burn, burnWindowHours: burnHours,
+                           burnPerHour: typicalPerHour ?? burn, burnWindowHours: burnHours,
                            sustainablePerHour: Double(windows.count) * 100 / (horizon / 3600),
                            emptyAt: sim.emptyAt, learned: learned, lowestLeft: sim.lowestLeft, level: level),
                 sim.usedAtReset)
@@ -335,23 +345,66 @@ extension QuotaModel {
     static let maxRecentFactor = 4.0
     /// How long burn at a normally idle hour is assumed to carry on.
     static let sessionHalfLife: TimeInterval = 3600
+    /// 5h window: how long the current burn itself is assumed to carry on before the rhythm
+    /// takes over. Longer than a session blip, so the 5h outlook reacts to what is happening now.
+    static let currentHalfLife: TimeInterval = 1.5 * 3600
 
-    /// Weekly points one account used, as (time, points) at the sample that revealed them.
-    /// Readings jitter by a point, so only a new high within a reset window counts.
-    static func usageEvents(_ points: [HistoryPoint]) -> [(t: Double, amount: Double)] {
+    /// Points one account used, as (time, points) at the sample that revealed them.
+    /// Readings jitter by a point, so only a new high within a reset window counts. A 5h
+    /// window that follows an expired one counts from zero; the weekly one starts at its
+    /// first reading, like the panel's model.
+    static func usageEvents(_ points: [HistoryPoint], short: Bool = false) -> [(t: Double, amount: Double)] {
         var events: [(Double, Double)] = []
         var reset: Double?
         var high = 0.0
         for p in points {
-            guard let r = p.long_reset, r > 0 else { continue }
-            let used = (p.long_used ?? 0) * 100
-            if let cur = reset, abs(cur - r) < 600 {
-                if used > high { events.append((p.t, used - high)); high = used }
+            guard let cur = value(p, short: short) else { continue }
+            if let r = reset, abs(r - cur.reset) < 600 {
+                if cur.used > high { events.append((p.t, cur.used - high)); high = cur.used }
             } else {
-                reset = r; high = used
+                if short, let r = reset, r <= p.t, cur.used > 0 { events.append((p.t, cur.used)) }
+                reset = cur.reset; high = cur.used
             }
         }
         return events
+    }
+
+    /// How many 5h-window points one weekly point costs, from what the pool's accounts burned
+    /// in both windows over the last two weeks. It turns the weekly rhythm into 5h points.
+    static func shortPerLongPoint(_ pool: [[HistoryPoint]], now: Date) -> Double? {
+        let n = now.timeIntervalSince1970
+        func total(short: Bool) -> Double {
+            pool.flatMap { usageEvents($0, short: short) }
+                .reduce(0.0) { $1.t > n - levelWindow && $1.t <= n ? $0 + $1.amount : $0 }
+        }
+        let long = total(short: false), short = total(short: true)
+        // A handful of weekly points is too coarse to divide by.
+        return long >= 5 && short > 0 ? short / long : nil
+    }
+
+    /// Burn for the 5h window, in its own points per hour. It starts at the current burn and
+    /// keeps a share of it that halves every `currentHalfLife`; the rest follows the rhythm
+    /// (`scale` × profile), scaled by how today compares with the usual and fading like the
+    /// weekly one. So it reacts to what is happening now, yet still winds down towards the
+    /// night and picks up before a working morning.
+    public static func reactiveRate(_ profile: UsageProfile, scale: Double, recentBurn: Double,
+                                    recentHours: Double, now: Date,
+                                    calendar: Calendar = .current) -> @Sendable (Date) -> Double {
+        let samples = max(1, Int((recentHours * 4).rounded()))
+        var usual = 0.0
+        for i in 0..<samples {
+            let back = (Double(i) + 0.5) / Double(samples) * recentHours * 3600
+            usual += scale * profile.rate(at: now.addingTimeInterval(-back), calendar: calendar)
+        }
+        usual /= Double(samples)
+        let factor = usual > 0 ? min(maxRecentFactor, recentBurn / usual) : 1
+        return { t in
+            let elapsed = max(0, t.timeIntervalSince(now))
+            let current = pow(0.5, elapsed / currentHalfLife)
+            let rhythm = scale * profile.rate(at: t, calendar: calendar)
+                * (1 + (factor - 1) * pow(0.5, elapsed / recentHalfLife))
+            return current * recentBurn + (1 - current) * rhythm
+        }
     }
 
     /// Hours each slot was covered between two instants (partial hours count partially).
