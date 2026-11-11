@@ -70,7 +70,7 @@ func TestQuotaHistoryPersistsAndPrunes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), QuotaHistoryFileName)
 	now := time.Now()
 	appendQuotaHistory(path, []QuotaHistoryPoint{
-		{At: now.Add(-40 * 24 * time.Hour).Unix(), Auth: "a", LongUsed: 0.1},
+		{At: now.Add(-quotaHistoryRetention - 24*time.Hour).Unix(), Auth: "a", LongUsed: 0.1},
 		{At: now.Add(-time.Hour).Unix(), Auth: "a", LongUsed: 0.3},
 		{At: now.Unix(), Auth: "b", LongUsed: 0.5},
 	})
