@@ -269,9 +269,17 @@ public enum QuotaModel {
             let shorts = accts.compactMap(\.short)
             var shortRate: (@Sendable (Date) -> Double)?
             if let profile, let scale = shortPerLongPoint(accts.map { byAuth[$0.id]! }, now: now) {
-                shortRate = reactiveRate(profile, scale: scale,
-                                         recentBurn: shorts.reduce(0) { $0 + $1.burnPerHour },
+                let poolBurn = shorts.reduce(0) { $0 + $1.burnPerHour }
+                shortRate = reactiveRate(profile, scale: scale, recentBurn: poolBurn,
                                          recentHours: shortBurnHours, now: now, calendar: calendar)
+                // Each account's 5h outlook: its own current burn, then its share of the rhythm.
+                let shares = rhythmShares(accts)
+                for i in accts.indices {
+                    guard let w = accts[i].short, let reset = w.resetAt else { continue }
+                    let rate = reactiveRate(profile, scale: scale * shares[i], recentBurn: w.burnPerHour,
+                                            recentHours: shortBurnHours, now: now, calendar: calendar)
+                    accts[i].short!.projectedAtReset = w.used + spent(rate, from: now, to: reset)
+                }
             }
             pools.append(PoolState(provider: provider, accounts: accts,
                                    short: poolWindow(shorts, burnHours: shortBurnHours,
@@ -380,6 +388,29 @@ extension QuotaModel {
         let long = total(short: false), short = total(short: true)
         // A handful of weekly points is too coarse to divide by.
         return long >= 5 && short > 0 ? short / long : nil
+    }
+
+    /// How the pool's rhythm is split over its accounts for the 5h outlook: chats stay on their
+    /// account, so in proportion to what each is burning now. With nothing burning, the next
+    /// chat's account takes it all.
+    static func rhythmShares(_ accounts: [AccountState]) -> [Double] {
+        let burns = accounts.map { $0.short?.burnPerHour ?? 0 }
+        let total = burns.reduce(0, +)
+        if total > 0 { return burns.map { $0 / total } }
+        if accounts.contains(where: \.nextChat) { return accounts.map { $0.nextChat ? 1 : 0 } }
+        return accounts.map { _ in 1 / Double(max(1, accounts.count)) }
+    }
+
+    /// Points burned between two instants at a varying rate (points per hour).
+    static func spent(_ rate: (Date) -> Double, from: Date, to: Date, step: TimeInterval = 300) -> Double {
+        var total = 0.0
+        var t = from
+        while t < to {
+            let next = min(t.addingTimeInterval(step), to)
+            total += max(0, rate(t.addingTimeInterval(next.timeIntervalSince(t) / 2))) * next.timeIntervalSince(t) / 3600
+            t = next
+        }
+        return total
     }
 
     /// Burn for the 5h window, in its own points per hour. It starts at the current burn and

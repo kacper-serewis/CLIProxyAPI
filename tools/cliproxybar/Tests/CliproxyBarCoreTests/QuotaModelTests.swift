@@ -195,3 +195,46 @@ private func rhythm(_ auth: String, from: Int, to: Int, perHour: Double = 1, res
     #expect(abs(k - 56.0 / 7.0) < 1e-9)
     #expect(QuotaModel.shortPerLongPoint([Array(points.prefix(3))], now: now) == nil)
 }
+
+@Test func rhythmSharesFollowCurrentBurnOrTheNextChat() {
+    let now = Date(timeIntervalSince1970: 0)
+    func acct(_ id: String, burn: Double, next: Bool = false) -> AccountState {
+        AccountState(id: id, name: id, provider: "claude",
+                     short: WindowState(used: 10, resetAt: now.addingTimeInterval(3600), period: 1, burnPerHour: burn),
+                     observedAt: now, nextChat: next)
+    }
+    #expect(QuotaModel.rhythmShares([acct("a", burn: 6), acct("b", burn: 2)]) == [0.75, 0.25])
+    #expect(QuotaModel.rhythmShares([acct("a", burn: 0), acct("b", burn: 0, next: true)]) == [0, 1])
+    #expect(QuotaModel.rhythmShares([acct("a", burn: 0), acct("b", burn: 0)]) == [0.5, 0.5])
+    #expect(abs(QuotaModel.spent({ _ in 6 }, from: now, to: now.addingTimeInterval(5400)) - 9) < 1e-9)
+}
+
+@Test func accountFiveHourOutlookWindsDownIntoTheNight() throws {
+    // A working rhythm in both windows, then a late session: 10 5h-points in the last hour at
+    // 22:00, window resets at 02:00. Held constant that would be +40; the rhythm expects
+    // nothing at night, so only the fading session is left.
+    let auth = "claude-1-a@x.json"
+    var points: [HistoryPoint] = []
+    var long = 0.0
+    for day in 2...11 {
+        let weekday = utc.component(.weekday, from: Date(timeIntervalSince1970: at(day, 12)))
+        if weekday == 1 || weekday == 7 { continue }
+        for hour in 9..<17 {
+            long += 1
+            let window = hour < 14 ? at(day, 14) : at(day, 19)
+            points.append(HistoryPoint(t: at(day, hour, 30), auth: auth, long_used: long / 100, long_reset: at(30, 0),
+                                       short_used: Double(hour < 14 ? hour - 8 : hour - 13) * 0.06, short_reset: window))
+        }
+    }
+    points.append(HistoryPoint(t: at(11, 20, 55), auth: auth, long_used: long / 100, long_reset: at(30, 0),
+                               short_used: 0.02, short_reset: at(12, 2)))
+    points.append(HistoryPoint(t: at(11, 21, 55), auth: auth, long_used: (long + 2) / 100, long_reset: at(30, 0),
+                               short_used: 0.12, short_reset: at(12, 2)))
+    let now = Date(timeIntervalSince1970: at(11, 22))
+    let pool = try #require(QuotaModel.pools(points: points, activeAuths: [auth], now: now, calendar: utc).first)
+    let short = try #require(pool.accounts[0].short)
+    #expect(abs(short.burnPerHour - 10) < 1e-9)
+    let projected = try #require(short.projectedAtReset)
+    // 12 used + 10 pts/h halving every 1.5h over 4h ≈ 12 + 18.2
+    #expect(projected > 28 && projected < 33)
+}
