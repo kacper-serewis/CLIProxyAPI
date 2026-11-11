@@ -246,6 +246,16 @@ public enum QuotaModel {
         var pools: [PoolState] = []
         for provider in Set(accounts.map(\.provider)).sorted() {
             var accts = accounts.filter { $0.provider == provider }.sorted { $0.name < $1.name }
+            // The proxy leaves the 5h fields out while an account's 5h window is idle. Such an
+            // account still has a full window to offer, so it counts in the 5h pool.
+            if accts.contains(where: { byAuth[$0.id]!.contains { ($0.short_reset ?? 0) > 0 } }) {
+                for i in accts.indices where accts[i].short == nil {
+                    accts[i].short = WindowState(used: 0, resetAt: nil, period: shortPeriod,
+                                                 burnPerHour: burn(byAuth[accts[i].id]!, short: true,
+                                                                   hours: shortBurnHours, now: n),
+                                                 elapsed: nil, projectedAtReset: nil)
+                }
+            }
             markNextChat(&accts)
             let recent = accts.reduce(0.0) { sum, a in
                 sum + burn(byAuth[a.id]!, short: false, hours: recentLongHours, now: n)

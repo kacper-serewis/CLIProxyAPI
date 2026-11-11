@@ -284,3 +284,23 @@ private func rhythm(_ auth: String, from: Int, to: Int, perHour: Double = 1, res
     #expect(restarted.check([pool(shortEmpty: empty)], now: later.addingTimeInterval(300)).isEmpty)
     #expect(restarted.check([pool(shortEmpty: empty)], now: later.addingTimeInterval(500)).isEmpty)
 }
+
+@Test func idleAccountCountsInTheFiveHourPool() throws {
+    // One seat is busy in its 5h window, the other has never opened one: its points carry no
+    // 5h fields. The pool is two windows wide, so 60% on one seat is 30% of the pool.
+    let now = Date(timeIntervalSince1970: 100_000)
+    let points = [
+        HistoryPoint(t: 99_000, auth: "claude-1-busy@x.json", long_used: 0.3, long_reset: 500_000,
+                     short_used: 0.5, short_reset: 110_000),
+        HistoryPoint(t: 99_900, auth: "claude-1-busy@x.json", long_used: 0.3, long_reset: 500_000,
+                     short_used: 0.6, short_reset: 110_000),
+        HistoryPoint(t: 99_900, auth: "claude-1-idle@x.json", long_used: 0.1, long_reset: 600_000),
+    ]
+    let pool = try #require(QuotaModel.pools(points: points, activeAuths: Set(points.map(\.auth)), now: now).first)
+    let short = try #require(pool.short)
+    #expect(short.used == 30)
+    #expect(pool.accounts.map { $0.short?.used } == [60, 0])
+    // A provider whose accounts never report a 5h window has no 5h pool.
+    let codex = [HistoryPoint(t: 99_900, auth: "codex-1-a@x.json", provider: "codex", long_used: 0.1, long_reset: 600_000)]
+    #expect(QuotaModel.pools(points: codex, activeAuths: ["codex-1-a@x.json"], now: now).first?.short == nil)
+}
