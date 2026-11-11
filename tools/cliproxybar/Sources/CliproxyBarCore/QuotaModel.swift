@@ -227,7 +227,7 @@ public enum QuotaModel {
     }
 
     /// One pool per provider, from the history of the active (not disabled) auth files.
-    /// `points` may hold up to the proxy's 30 days and accounts that are no longer active: the
+    /// `points` may hold up to the proxy's 90 days and accounts that are no longer active: the
     /// usage rhythm is learned from all of them.
     public static func pools(points: [HistoryPoint], activeAuths: Set<String>, now: Date,
                              calendar: Calendar = .current) -> [PoolState] {
@@ -460,8 +460,8 @@ public enum ProxyFiles {
     }
 
     public static func load(now: Date = Date(), dir: URL = dir) -> [PoolState] {
-        // Everything the proxy keeps (30 days): the usage rhythm is learned from it.
-        let cutoff = now.timeIntervalSince1970 - 31 * 86400
+        // Everything the proxy keeps (90 days): the usage rhythm is learned from it.
+        let cutoff = now.timeIntervalSince1970 - 91 * 86400
         let data = (try? Data(contentsOf: dir.appendingPathComponent("quota-history.jsonl"))) ?? Data()
         let points = QuotaModel.parse(data).filter { $0.t >= cutoff }
         return QuotaModel.pools(points: points, activeAuths: activeAuths(in: dir), now: now)

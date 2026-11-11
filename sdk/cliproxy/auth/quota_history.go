@@ -28,7 +28,11 @@ const (
 	// quotaHistoryObservedStep records unchanged values again once the provider has
 	// reported them this much later, so readers can tell how fresh the values are.
 	quotaHistoryObservedStep = 10 * time.Minute
-	quotaHistoryRetention    = 30 * 24 * time.Hour
+	// quotaHistoryRetention is how long points stay on disk: enough weeks for the panel and
+	// the menu bar app to learn a weekday/weekend usage rhythm.
+	quotaHistoryRetention = 90 * 24 * time.Hour
+	// quotaDemandWindow is how far back adaptive-reserve looks when forecasting demand.
+	quotaDemandWindow = 30 * 24 * time.Hour
 )
 
 // QuotaHistoryPoint is one credential's quota observation. Usage values are fractions in

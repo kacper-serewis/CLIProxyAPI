@@ -59,7 +59,7 @@ func (h *quotaDemandHistory) add(points []QuotaHistoryPoint, now time.Time) {
 	if h.points == nil {
 		h.points = make(map[string][]QuotaHistoryPoint)
 	}
-	cutoff := now.Add(-quotaHistoryRetention).Unix()
+	cutoff := now.Add(-quotaDemandWindow).Unix()
 	for _, p := range points {
 		if p.Provider != "claude" || p.Observed <= 0 || p.Observed < cutoff || p.Observed > now.Add(time.Minute).Unix() {
 			continue
