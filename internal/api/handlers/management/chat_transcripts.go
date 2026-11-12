@@ -42,5 +42,9 @@ func (h *Handler) GetChatFeed(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.Query("limit"))
-	c.JSON(http.StatusOK, h.authManager.ChatFeed(limit, c.Query("tools") == "1"))
+	var origins []string
+	if raw := c.Query("origin"); raw != "" {
+		origins = strings.Split(raw, ",")
+	}
+	c.JSON(http.StatusOK, h.authManager.ChatFeed(limit, c.Query("tools") == "1", origins...))
 }

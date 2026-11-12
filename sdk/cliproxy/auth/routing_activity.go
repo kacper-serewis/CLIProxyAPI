@@ -28,11 +28,17 @@ type RoutingSwitch struct {
 // RoutingSession is the in-memory routing history of one client session, kept so the
 // management panel can show which credential and model each conversation is using.
 type RoutingSession struct {
-	ID        string          `json:"id"`
-	Client    string          `json:"client,omitempty"`
-	Agent     string          `json:"agent,omitempty"`
-	Parent    string          `json:"parent,omitempty"`
-	Title     string          `json:"title,omitempty"`
+	ID     string `json:"id"`
+	Client string `json:"client,omitempty"`
+	Agent  string `json:"agent,omitempty"`
+	Parent string `json:"parent,omitempty"`
+	Title  string `json:"title,omitempty"`
+	// Origin is how the client was started: cli (interactive Claude Code or Codex), print
+	// (claude -p, codex exec), sdk (Agent SDK scripts), ide, app (T3 Code and other apps) or
+	// other. A claude -p started inside another Claude Code session inherits that session's
+	// entrypoint, so it shows up as its parent's origin.
+	Origin    string          `json:"origin,omitempty"`
+	UserAgent string          `json:"user_agent,omitempty"`
 	Provider  string          `json:"provider"`
 	Auth      string          `json:"auth"`
 	Model     string          `json:"model"`
@@ -92,6 +98,18 @@ func recordRoutingActivity(selected *Auth, model string, opts cliproxyexecutor.O
 			session.Switches = session.Switches[len(session.Switches)-maxRoutingSwitches:]
 		}
 	}
+	if session.Title == "" {
+		// The first request of a run can be a warm-up without user text (claude -p does this).
+		session.Title = routingSessionTitle(opts.OriginalRequest)
+	}
+	if session.UserAgent == "" && opts.Headers != nil {
+		ua := strings.TrimSpace(opts.Headers.Get("User-Agent"))
+		if runes := []rune(ua); len(runes) > 160 {
+			ua = string(runes[:160])
+		}
+		session.UserAgent = ua
+		session.Origin = routingSessionOrigin(ua)
+	}
 	session.Provider = strings.ToLower(selected.Provider)
 	session.Auth = selected.ID
 	session.Model = model
@@ -110,6 +128,43 @@ func evictRoutingSessionsLocked() {
 		}
 		delete(routingActivity.sessions, oldest.ID)
 	}
+}
+
+// routingSessionOrigin tells how a client was started from its User-Agent. Claude Code
+// sends "claude-cli/<version> (external, <entrypoint>...)"; Codex names its originator first.
+func routingSessionOrigin(ua string) string {
+	lower := strings.ToLower(ua)
+	if _, rest, ok := strings.Cut(lower, "(external, "); ok && strings.HasPrefix(lower, "claude-cli/") {
+		entry := rest
+		if i := strings.IndexAny(entry, ",)"); i >= 0 {
+			entry = entry[:i]
+		}
+		switch entry = strings.TrimSpace(entry); {
+		case entry == "cli":
+			return "cli"
+		case entry == "sdk-cli":
+			return "print"
+		case strings.HasPrefix(entry, "sdk"):
+			return "sdk"
+		case strings.Contains(entry, "vscode") || strings.Contains(entry, "jetbrains") || strings.Contains(entry, "ide"):
+			return "ide"
+		case strings.Contains(rest, "agent-sdk/"):
+			// An app built on the Agent SDK names itself, e.g. T3 Code sends "t3-code".
+			return "app"
+		}
+		return "other"
+	}
+	switch {
+	case strings.HasPrefix(lower, "codex_exec"):
+		return "print"
+	case strings.HasPrefix(lower, "codex_cli_rs"), strings.HasPrefix(lower, "codex-tui"), strings.HasPrefix(lower, "codex_tui"):
+		return "cli"
+	case strings.HasPrefix(lower, "t3 code"), strings.HasPrefix(lower, "codex_sdk"):
+		return "app"
+	case ua == "":
+		return ""
+	}
+	return "other"
 }
 
 // routingSessionTitle picks the first user text of a conversation so it can be

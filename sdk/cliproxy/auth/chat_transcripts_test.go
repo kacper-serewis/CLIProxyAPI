@@ -79,6 +79,17 @@ func TestChatTranscriptKeepsMessagesAcrossRequests(t *testing.T) {
 	if blocks := feed.Items[1].Message.Blocks; len(blocks) != 1 || blocks[0].Kind != "text" {
 		t.Fatalf("feed hides context: %+v", blocks)
 	}
+
+	resetRoutingActivity()
+	opts := claudeCodeOpts("chat-1", second)
+	opts.Headers.Set("User-Agent", "claude-cli/2.1.310 (external, sdk-cli)")
+	recordRoutingActivity(&Auth{ID: "claude-a.json", Provider: "claude"}, "claude-haiku-5-5", opts, now)
+	if got := (&Manager{}).ChatFeed(10, false, "print"); len(got.Items) != 2 || got.Sessions[id].Origin != "print" {
+		t.Fatalf("print feed = %+v", got)
+	}
+	if got := (&Manager{}).ChatFeed(10, false, "cli"); len(got.Items) != 0 {
+		t.Fatalf("cli feed = %+v", got.Items)
+	}
 }
 
 func TestChatTranscriptIgnoresOneOffSideRequests(t *testing.T) {
