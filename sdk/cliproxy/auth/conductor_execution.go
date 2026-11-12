@@ -223,11 +223,14 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	var preferredUpstreamErr error
 	var terminalRoundRejectedByScheduler bool
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	chatReply := recordChatRequest(opts, time.Now())
+	defer chatReply.publish(true)
 	for attempt := 0; ; attempt++ {
 		roundAttempted := make(map[string]struct{})
 		roundOpts := withAttemptedAuthTracker(opts, roundAttempted)
 		resp, errExec := m.executeMixedOnce(ctx, normalized, req, roundOpts, maxRetryCredentials, attempt, defaultRequestRetry)
 		if errExec == nil {
+			chatReply.observeResponse(resp.Payload)
 			return resp, nil
 		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
@@ -364,6 +367,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	var terminalRoundRejectedByScheduler bool
 	homeRetryLimit := -1
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
+	chatReply := recordChatRequest(opts, time.Now())
 	attempt := 0
 	retryRoundPending := false
 	retryRoundWaited := false
@@ -372,7 +376,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		roundOpts := withAttemptedAuthTracker(opts, roundAttempted)
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, roundOpts, maxRetryCredentials, &homeRetryLimit, attempt, defaultRequestRetry)
 		if errStream == nil {
-			return result, nil
+			return teeChatStream(ctx, chatReply, result), nil
 		}
 		if hasUpstreamExecutionAttempt(errStream) {
 			preferredUpstreamErr = errStream
