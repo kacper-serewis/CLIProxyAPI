@@ -10,7 +10,6 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
 const (
@@ -67,20 +66,10 @@ func recordRoutingActivity(selected *Auth, model string, opts cliproxyexecutor.O
 	if selected == nil {
 		return
 	}
-	info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, opts.OriginalRequest, opts.Metadata)
-	id := ""
-	if ok {
-		id = info.SessionID
-	}
-	if id == "" {
-		if lcp, _ := opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey].(string); lcp != "" {
-			id = lcp
-		}
-	}
+	id, info := chatSessionKey(opts)
 	if id == "" {
 		return
 	}
-	id = cliproxysession.BoundSessionIdentity(id)
 
 	routingActivity.Lock()
 	defer routingActivity.Unlock()
