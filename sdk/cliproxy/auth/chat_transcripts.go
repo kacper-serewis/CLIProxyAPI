@@ -483,7 +483,7 @@ func parseChatRequest(payload []byte) ([]ChatMessage, int) {
 			role := item.Get("role").String()
 			var blocks []ChatBlock
 			if role == "system" || role == "developer" {
-				blocks = []ChatBlock{newChatBlock("context", role, item.Get("content").String())}
+				blocks = []ChatBlock{newChatBlock("context", role, toolResultText(item.Get("content")))}
 				role = "system"
 			} else if item.Get("tool_calls").Exists() || role == "tool" {
 				blocks = parseChatCompletionMessage(item)
@@ -725,14 +725,28 @@ type ChatFeedResponse struct {
 
 // ChatFeed returns the newest messages across all chats, newest first. Long blocks are
 // shortened; the transcript has them in full. Tool results and client context are left
-// out unless includeTools is set.
-func (m *Manager) ChatFeed(limit int, includeTools bool) ChatFeedResponse {
+// out unless includeTools is set. With origins, only chats started that way (see
+// RoutingSession.Origin) are included.
+func (m *Manager) ChatFeed(limit int, includeTools bool, origins ...string) ChatFeedResponse {
 	if limit <= 0 || limit > 300 {
 		limit = 80
+	}
+	sessions := make(map[string]RoutingSession)
+	for _, s := range m.RoutingSessions() {
+		sessions[s.ID] = s
+	}
+	allowed := make(map[string]bool)
+	for _, origin := range origins {
+		if origin = strings.TrimSpace(origin); origin != "" {
+			allowed[origin] = true
+		}
 	}
 	chatStore.Lock()
 	var items []ChatFeedItem
 	for id, t := range chatStore.transcripts {
+		if len(allowed) > 0 && !allowed[sessions[id].Origin] {
+			continue
+		}
 		add := func(msg ChatMessage) {
 			if !includeTools && !chatMessageHasProse(msg) {
 				return
@@ -764,10 +778,6 @@ func (m *Manager) ChatFeed(limit int, includeTools bool) ChatFeedResponse {
 	}
 	chatStore.Unlock()
 
-	sessions := make(map[string]RoutingSession)
-	for _, s := range m.RoutingSessions() {
-		sessions[s.ID] = s
-	}
 	out := ChatFeedResponse{Items: items, Sessions: make(map[string]RoutingSession)}
 	for _, item := range items {
 		if s, ok := sessions[item.SessionID]; ok {
