@@ -47,6 +47,29 @@ public struct AccountState: Sendable, Identifiable {
     public var long: WindowState?
     public var observedAt: Date
     public var nextChat = false
+    /// Usage readings can jitter down without a reset. Keep availability conservative,
+    /// while the bars still show the latest reported percentage.
+    public var shortHighWaterUsed: Double?
+    public var longHighWaterUsed: Double?
+
+    /// Both limits belong to this seat; spare quota on different seats cannot be combined.
+    public var shortConstrained: Bool { max(short?.used ?? 0, shortHighWaterUsed ?? 0) >= QuotaModel.newChatShortLimit }
+    public var longConstrained: Bool { max(long?.used ?? 0, longHighWaterUsed ?? 0) >= QuotaModel.newChatLongLimit }
+    public var constrained: Bool { shortConstrained || longConstrained }
+    public var exhausted: Bool { (short?.used ?? 0) >= 100 || (long?.used ?? 0) >= 100 }
+
+    /// All limiting windows on this account must reset before it offers safe headroom.
+    public var headroomAt: Date? {
+        let limits = [(shortConstrained, short), (longConstrained, long)].filter { $0.0 }
+        guard !limits.isEmpty, limits.allSatisfy({ $0.1?.resetAt != nil }) else { return nil }
+        return limits.compactMap { $0.1?.resetAt }.max()
+    }
+}
+
+public enum QuotaAvailability: Sendable {
+    case available, constrained, exhausted, unknown
+
+    public var needsAttention: Bool { self == .constrained || self == .exhausted }
 }
 
 public struct PoolWindow: Sendable {
@@ -76,8 +99,22 @@ public struct PoolState: Sendable {
     /// Weekly burn over the last 5h, for "right now" next to the usual pace.
     public var longBurnRecent: Double
     public var dataAge: TimeInterval
+    /// Current per-seat headroom, independent of the two pooled projections. Safety
+    /// thresholds demote seats; the proxy can still try them as a last resort.
+    public var availability: QuotaAvailability {
+        guard dataAge <= QuotaModel.staleAfter, !accounts.isEmpty else { return .unknown }
+        if accounts.contains(where: { !$0.constrained && $0.long != nil }) { return .available }
+        if accounts.allSatisfy(\.exhausted) { return .exhausted }
+        if accounts.allSatisfy(\.constrained) { return .constrained }
+        return .unknown
+    }
+    public var headroomAt: Date? {
+        guard availability.needsAttention else { return nil }
+        return accounts.compactMap(\.headroomAt).min()
+    }
     public var level: Level {
         if dataAge > QuotaModel.staleAfter { return .stale }
+        if availability.needsAttention { return .over }
         return max(short?.level ?? .ok, long?.level ?? .ok)
     }
 }
@@ -198,6 +235,16 @@ public enum QuotaModel {
         let n = now.timeIntervalSince1970
         var state = AccountState(id: auth, name: displayName(auth), provider: latest.provider,
                                  observedAt: Date(timeIntervalSince1970: latest.observed ?? latest.t))
+
+        func highWater(short: Bool) -> Double? {
+            guard let latestWindow = value(latest, short: short), latestWindow.reset > n else { return nil }
+            return points.compactMap { p -> Double? in
+                guard let window = value(p, short: short), abs(window.reset - latestWindow.reset) < 600 else { return nil }
+                return window.used
+            }.max()
+        }
+        state.shortHighWaterUsed = highWater(short: true)
+        state.longHighWaterUsed = highWater(short: false)
 
         if let r = latest.long_reset, r > 0 {
             var reset = r
@@ -322,9 +369,7 @@ public enum QuotaModel {
     /// Soonest-reset: new chats go to the account whose weekly window resets first, unless it is
     /// past the new-chat thresholds.
     static func markNextChat(_ accounts: inout [AccountState]) {
-        let candidates = accounts.indices.filter {
-            (accounts[$0].short?.used ?? 0) < newChatShortLimit && (accounts[$0].long?.used ?? 0) < newChatLongLimit
-        }
+        let candidates = accounts.indices.filter { !accounts[$0].constrained }
         if let i = candidates.min(by: {
             (accounts[$0].long?.resetAt ?? .distantFuture) < (accounts[$1].long?.resetAt ?? .distantFuture)
         }) { accounts[i].nextChat = true }

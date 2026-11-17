@@ -74,10 +74,17 @@ struct MenuLabel: View {
     var body: some View {
         let pool = store.claude
         let stale = pool == nil || pool?.level == .stale
-        Image(nsImage: Self.gauge([
-            (pool?.short?.used ?? 0, stale ? .stale : pool?.short?.level ?? .stale),
-            (pool?.long?.used ?? 0, stale ? .stale : pool?.long?.level ?? .stale),
-        ]))
+        let constrained = pool?.availability.needsAttention == true
+        HStack(spacing: 3) {
+            if constrained {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+            }
+            Image(nsImage: Self.gauge([
+                (pool?.short?.used ?? 0, stale ? .stale : constrained ? .over : pool?.short?.level ?? .stale),
+                (pool?.long?.used ?? 0, stale ? .stale : constrained ? .over : pool?.long?.level ?? .stale),
+            ]))
+        }
+        .help(constrained ? "Claude: every account is near or at a quota limit" : "Claude pooled quota: 5-hour / weekly")
     }
 
     /// Two stacked mini bars: 5h on top, weekly below. Fill = pool used, colour = verdict.

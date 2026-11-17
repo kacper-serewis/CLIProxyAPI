@@ -50,6 +50,22 @@ struct PoolSection: View {
                 Text("Last sample \(duration(pool.dataAge)) ago — is the proxy running?")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if pool.availability.needsAttention {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(pool.availability == .exhausted ? "Every account has a full quota window."
+                          : "Every account is near or at a quota limit.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    if pool.availability == .constrained {
+                        Text("The proxy may still try the remaining quota, but no seat has safe headroom in both windows.")
+                    }
+                    if let reset = pool.headroomAt {
+                        Text("Headroom returns \(when(reset, now: now)), assuming no further usage.")
+                    }
+                    Text("The totals below treat each window separately. Spare quota on different seats cannot be combined.")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+            }
             if let short = pool.short {
                 PoolWindowView(title: "5-hour", window: short, now: now,
                                burnLabel: "last hour", detail: nil,
@@ -61,14 +77,17 @@ struct PoolSection: View {
                                detail: String(format: "last 5h: %.1f pts/h", pool.longBurnRecent))
             }
             ForEach(pool.accounts) {
-                AccountView(account: $0, now: now, shortPool: pool.short?.level ?? pool.level,
-                            longPool: pool.long?.level ?? pool.level)
+                AccountView(account: $0, now: now,
+                            shortPool: pool.availability.needsAttention ? .over : pool.short?.level ?? pool.level,
+                            longPool: pool.availability.needsAttention ? .over : pool.long?.level ?? pool.level)
             }
         }
     }
 
     private var headline: String {
-        switch pool.level {
+        if pool.availability == .exhausted { return "Quota exhausted" }
+        if pool.availability == .constrained { return "No safe headroom" }
+        return switch pool.level {
         case .ok: "Within limits"
         case .watch: "Getting tight"
         case .over: "Over pace"
@@ -129,6 +148,10 @@ struct AccountView: View {
                         .background(Capsule().fill(Color.accentColor.opacity(0.2)))
                 }
                 Spacer()
+            }
+            if account.constrained {
+                Text("\(account.shortConstrained && account.longConstrained ? "5h + weekly" : account.shortConstrained ? "5h" : "Weekly") quota \(account.exhausted ? "at limit" : "near limit")")
+                    .font(.caption2).foregroundStyle(shortPool == .over || longPool == .over ? .red : .secondary)
             }
             if let s = account.short { row("5h", s, pool: shortPool) }
             if let l = account.long { row("Week", l, pool: longPool) }

@@ -13,6 +13,18 @@ fill shows how much of the pool is used and the colour shows the verdict:
 - red: at this pace the pool runs out before it refills
 - grey: no sample from the proxy in 10 minutes
 
+A red warning triangle and red bars override the separate window colours when every seat
+is near or at either quota limit (90% of 5h or 99% weekly, matching the router). The dropdown
+says **No safe headroom**, names each seat's limiting window, and shows the earliest reset
+that restores headroom in both windows on one seat. If both windows constrain a seat, both
+must reset. **Quota exhausted** means every seat has at least one window at 100%.
+The safety thresholds only demote seats: the proxy may still try their remaining quota.
+These are quota observations, not a live check for upstream rejection or credential health.
+The headroom warning retains each window's highest reading until reset so one-point jitter
+cannot clear it; the usage bars still show the latest reported percentages.
+The separate pooled projections remain visible, but cannot establish current availability:
+one seat's spare 5h quota cannot be combined with another seat's spare weekly quota.
+
 **Dropdown:** for each pool (Claude, Codex), pooled 5h and weekly usage, burn in points per
 hour against a sustainable pace, and a projection of when the pool runs out. Each account
 shows bars with a tick for elapsed window time (fill past the tick = ahead of pace), reset

@@ -304,3 +304,116 @@ private func rhythm(_ auth: String, from: Int, to: Int, perHour: Double = 1, res
     let codex = [HistoryPoint(t: 99_900, auth: "codex-1-a@x.json", provider: "codex", long_used: 0.1, long_reset: 600_000)]
     #expect(QuotaModel.pools(points: codex, activeAuths: ["codex-1-a@x.json"], now: now).first?.short == nil)
 }
+
+// MARK: - Quota must be available in both windows on the same seat
+
+private func squeezedPool(now: Date, aShort: Double = 0, aLong: Double = 0.99,
+                          bShort: Double = 0.92, bLong: Double = 0.65) -> PoolState {
+    let t = now.timeIntervalSince1970
+    let points = [
+        HistoryPoint(t: t, auth: "a", long_used: aLong, long_reset: t + 5 * 3600,
+                     short_used: aShort, short_reset: aShort > 0 ? t + 3600 : nil),
+        HistoryPoint(t: t, auth: "b", long_used: bLong, long_reset: t + 3 * 86400,
+                     short_used: bShort, short_reset: t + 2 * 3600),
+    ]
+    return QuotaModel.pools(points: points, activeAuths: ["a", "b"], now: now)[0]
+}
+
+@Test func splitLimitsOverrideHealthyIndependentPools() {
+    let now = Date(timeIntervalSince1970: 100_000)
+    let pool = squeezedPool(now: now)
+    // With no measured burn, both independent projections claim the pool lasts.
+    #expect(pool.short?.emptyAt == nil)
+    #expect(pool.long?.emptyAt == nil)
+    #expect(pool.short?.used == 46)
+    #expect(pool.availability == .constrained)
+    #expect(pool.level == .over)
+    #expect(pool.accounts.allSatisfy { !$0.nextChat })
+    #expect(pool.headroomAt == now.addingTimeInterval(2 * 3600))
+    #expect(pool.accounts[0].longConstrained)
+    #expect(pool.accounts[1].shortConstrained)
+}
+
+@Test func safetyThresholdsDoNotClaimHardExhaustion() {
+    let now = Date(timeIntervalSince1970: 100_000)
+    #expect(squeezedPool(now: now, bShort: 0.90).availability == .constrained)
+    #expect(squeezedPool(now: now, aLong: 1, bShort: 0.99).availability == .constrained)
+    #expect(squeezedPool(now: now, aLong: 1, bShort: 1).availability == .exhausted)
+    #expect(squeezedPool(now: now, bShort: 0.899).availability == .available)
+    #expect(squeezedPool(now: now, aLong: 0.989).availability == .available)
+    #expect(squeezedPool(now: now, bShort: 0.5).headroomAt == nil)
+}
+
+@Test func recoveryWaitsForBothLimitsOnASeat() {
+    let now = Date(timeIntervalSince1970: 100_000)
+    let pool = squeezedPool(now: now, aShort: 0.95, bLong: 0.99)
+    // a's 5h reset in 1h is insufficient: its week resets in 5h. b must wait 3 days.
+    #expect(pool.accounts[0].headroomAt == now.addingTimeInterval(5 * 3600))
+    #expect(pool.accounts[1].headroomAt == now.addingTimeInterval(3 * 86400))
+    #expect(pool.headroomAt == now.addingTimeInterval(5 * 3600))
+}
+
+@Test func resetRestoresHeadroomAndIdleShortQuotaCounts() {
+    let now = Date(timeIntervalSince1970: 100_000)
+    let t = now.timeIntervalSince1970
+    let points = [
+        HistoryPoint(t: t, auth: "a", long_used: 0.99, long_reset: t + 5 * 3600),
+        HistoryPoint(t: t, auth: "b", long_used: 0.65, long_reset: t + 3 * 86400,
+                     short_used: 1, short_reset: t),
+    ]
+    let pool = QuotaModel.pools(points: points, activeAuths: ["a", "b"], now: now)[0]
+    #expect(pool.availability == .available)
+    #expect(pool.accounts[1].nextChat)
+    // a's weekly reset also restores headroom, even with no 5h fields in its history.
+    let afterWeek = QuotaModel.pools(points: [
+        HistoryPoint(t: t, auth: "a", long_used: 1, long_reset: t),
+    ], activeAuths: ["a"], now: now)[0]
+    #expect(afterWeek.availability == .available)
+}
+
+@Test func unavailableOrStaleObservationsDoNotClaimAvailability() {
+    let now = Date(timeIntervalSince1970: 100_000)
+    var pool = squeezedPool(now: now)
+    pool.dataAge = QuotaModel.staleAfter + 1
+    #expect(pool.availability == .unknown)
+    #expect(pool.level == .stale)
+    #expect(pool.headroomAt == nil)
+    pool.dataAge = 0
+    pool.accounts = []
+    #expect(pool.availability == .unknown)
+    pool.accounts = [AccountState(id: "unknown", name: "unknown", provider: "claude", observedAt: now)]
+    #expect(pool.availability == .unknown)
+}
+
+@Test func downwardJitterDoesNotClearHeadroomWarningButResetDoes() {
+    let now = Date(timeIntervalSince1970: 100_000)
+    let t = now.timeIntervalSince1970
+    let points = [
+        HistoryPoint(t: t - 120, auth: "a", long_used: 0.99, long_reset: t + 3600),
+        HistoryPoint(t: t, auth: "a", long_used: 0.98, long_reset: t + 3600),
+        HistoryPoint(t: t - 120, auth: "b", long_used: 0.65, long_reset: t + 86400,
+                     short_used: 0.90, short_reset: t + 1800),
+        HistoryPoint(t: t, auth: "b", long_used: 0.65, long_reset: t + 86400,
+                     short_used: 0.89, short_reset: t + 1800),
+    ]
+    let pool = QuotaModel.pools(points: points, activeAuths: ["a", "b"], now: now)[0]
+    #expect(pool.availability == .constrained)
+    #expect(pool.accounts[0].long?.used == 98)
+    #expect(pool.accounts[1].short?.used == 89)
+    #expect(pool.accounts.allSatisfy { !$0.nextChat })
+    #expect(pool.headroomAt == now.addingTimeInterval(1800))
+    // A new sample makes the pool fresh after b's reset; its old peak must not
+    // carry over to the new idle window.
+    let later = now.addingTimeInterval(1800)
+    let refreshed = points + [HistoryPoint(t: later.timeIntervalSince1970, auth: "b",
+                                           long_used: 0.65, long_reset: t + 86400)]
+    let recovered = QuotaModel.pools(points: refreshed, activeAuths: ["a", "b"], now: later)[0]
+    #expect(recovered.availability == .available)
+    #expect(recovered.accounts[1].nextChat)
+    // A newly reported weekly window also forgets the old peak.
+    let newWeek = points + [HistoryPoint(t: t + 3600, auth: "a", long_used: 0.01,
+                                         long_reset: t + 3600 + QuotaModel.longPeriod)]
+    let account = QuotaModel.account(auth: "a", points: newWeek.filter { $0.auth == "a" },
+                                     now: now.addingTimeInterval(3600))
+    #expect(account?.longConstrained == false)
+}
