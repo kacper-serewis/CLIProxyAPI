@@ -80,7 +80,7 @@ public struct PoolWindow: Sendable {
     public var burnWindowHours: Double
     /// Burn that would spend exactly the pool's capacity per period.
     public var sustainablePerHour: Double
-    /// When the pool runs dry, spending it the soonest-reset way. nil = it lasts.
+    /// When joint per-seat headroom is lost within this window's horizon. nil = it lasts.
     public var emptyAt: Date?
     /// The projection follows the learned usage rhythm instead of holding `burnPerHour`
     /// constant. For the weekly window `burnPerHour` is then the usual week's average.
@@ -99,6 +99,8 @@ public struct PoolState: Sendable {
     /// Weekly burn over the last 5h, for "right now" next to the usual pace.
     public var longBurnRecent: Double
     public var dataAge: TimeInterval
+    public var forecast: HeadroomForecast? = nil
+    public var headroomWarning: Bool { availability.needsAttention || (dataAge <= QuotaModel.staleAfter && forecast?.firstGap != nil) }
     /// Current per-seat headroom, independent of the two pooled projections. Safety
     /// thresholds demote seats; the proxy can still try them as a last resort.
     public var availability: QuotaAvailability {
@@ -114,7 +116,7 @@ public struct PoolState: Sendable {
     }
     public var level: Level {
         if dataAge > QuotaModel.staleAfter { return .stale }
-        if availability.needsAttention { return .over }
+        if headroomWarning { return .over }
         return max(short?.level ?? .ok, long?.level ?? .ok)
     }
 }
@@ -316,11 +318,6 @@ public enum QuotaModel {
             let long = poolWindow(withLong.map { accts[$0].long! }, burnHours: longBurnHours,
                                   horizon: longPeriod, watchBelow: 15, now: now,
                                   rate: rate, typicalPerHour: profile.map { $0.perWeek / (longPeriod / 3600) })
-            // With a learned rhythm, each account's weekly outlook is its share of the pool
-            // projection instead of its own 24h burn held constant.
-            if let long, long.window.learned {
-                for (k, i) in withLong.enumerated() { accts[i].long!.projectedAtReset = long.usedAtReset[k] }
-            }
             // The 5h window follows the same rhythm, converted to its own points, but leans on
             // the last hour's burn. burnPerHour stays that last hour.
             let shorts = accts.compactMap(\.short)
@@ -329,22 +326,30 @@ public enum QuotaModel {
                 let poolBurn = shorts.reduce(0) { $0 + $1.burnPerHour }
                 shortRate = reactiveRate(profile, scale: scale, recentBurn: poolBurn,
                                          recentHours: shortBurnHours, now: now, calendar: calendar)
-                // Each account's 5h outlook: its own current burn, then its share of the rhythm.
-                let shares = rhythmShares(accts)
+
+            }
+            let constantLongBurn = accts.reduce(0.0) { $0 + ($1.long?.burnPerHour ?? 0) }
+            let forecast = accts.allSatisfy { $0.long != nil } ? projectJoint(accts,
+                longRate: rate ?? { _ in constantLongBurn },
+                shortRate: shortRate ?? { _ in shorts.reduce(0) { $0 + $1.burnPerHour } }, now: now) : nil
+            var shortWindow = poolWindow(shorts, burnHours: shortBurnHours, horizon: shortPeriod,
+                                         watchBelow: 20, now: now, rate: shortRate)?.window
+            var longWindow = long?.window
+            if let forecast {
+                let shortGap = forecast.gaps.first { $0.start < now.addingTimeInterval(shortPeriod) }
+                shortWindow?.emptyAt = shortGap?.start
+                shortWindow?.lowestLeft = forecast.shortLowest
+                shortWindow?.level = shortGap != nil ? .over : (forecast.shortLowest < 20 ? .watch : .ok)
+                longWindow?.emptyAt = forecast.firstGap?.start
+                longWindow?.lowestLeft = forecast.longLowest
+                longWindow?.level = forecast.firstGap != nil ? .over : (forecast.longLowest < 15 ? .watch : .ok)
                 for i in accts.indices {
-                    guard let w = accts[i].short, let reset = w.resetAt else { continue }
-                    let rate = reactiveRate(profile, scale: scale * shares[i], recentBurn: w.burnPerHour,
-                                            recentHours: shortBurnHours, now: now, calendar: calendar)
-                    accts[i].short!.projectedAtReset = w.used + spent(rate, from: now, to: reset)
+                    accts[i].short?.projectedAtReset = forecast.shortAtReset[i]
+                    accts[i].long?.projectedAtReset = forecast.longAtReset[i]
                 }
             }
-            pools.append(PoolState(provider: provider, accounts: accts,
-                                   short: poolWindow(shorts, burnHours: shortBurnHours,
-                                                     horizon: shortPeriod, watchBelow: 20, now: now,
-                                                     rate: shortRate)?.window,
-                                   long: long?.window,
-                                   longBurnRecent: recent,
-                                   dataAge: n - newest))
+            pools.append(PoolState(provider: provider, accounts: accts, short: shortWindow, long: longWindow,
+                                   longBurnRecent: recent, dataAge: n - newest, forecast: forecast))
         }
         return pools
     }
@@ -607,8 +612,11 @@ public struct PoolAlert: Equatable, Sendable {
     public var provider: String
     public var short: Bool
     public var emptyAt: Date
+    public var joint = false
+    public var recoversAt: Date?
 
-    public init(key: String, provider: String, short: Bool, emptyAt: Date) {
+    public init(key: String, provider: String, short: Bool, emptyAt: Date, joint: Bool = false, recoversAt: Date? = nil) {
+        self.joint = joint; self.recoversAt = recoversAt
         self.key = key; self.provider = provider; self.short = short; self.emptyAt = emptyAt
     }
 }
@@ -631,16 +639,27 @@ public struct PoolAlerter: Sendable {
         var alerts: [PoolAlert] = []
         var over: Set<String> = []
         for pool in pools where pool.level != .stale {
-            for (short, window) in [(true, pool.short), (false, pool.long)] {
-                guard let emptyAt = window?.emptyAt else { continue }
-                let key = "\(pool.provider).\(short ? "short" : "long")"
+            let candidates: [PoolAlert]
+            if let forecast = pool.forecast {
+                candidates = forecast.firstGap.map {
+                    [PoolAlert(key: "\(pool.provider).headroom", provider: pool.provider, short: true,
+                               emptyAt: $0.start, joint: true, recoversAt: $0.end)]
+                } ?? []
+            } else {
+                candidates = [(true, pool.short), (false, pool.long)].compactMap { short, window in
+                    window?.emptyAt.map { PoolAlert(key: "\(pool.provider).\(short ? "short" : "long")",
+                                                   provider: pool.provider, short: short, emptyAt: $0) }
+                }
+            }
+            for alert in candidates {
+                let key = alert.key
                 over.insert(key)
                 let since = overSince[key] ?? now
                 overSince[key] = since
                 guard now.timeIntervalSince(since) >= Self.holdFor else { continue }
-                if let last = lastSent[key], now.timeIntervalSince(last) < Self.cooldown(short: short) { continue }
+                if let last = lastSent[key], now.timeIntervalSince(last) < Self.cooldown(short: alert.short) { continue }
                 lastSent[key] = now
-                alerts.append(PoolAlert(key: key, provider: pool.provider, short: short, emptyAt: emptyAt))
+                alerts.append(alert)
             }
         }
         overSince = overSince.filter { over.contains($0.key) }

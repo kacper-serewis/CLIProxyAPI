@@ -74,7 +74,7 @@ struct MenuLabel: View {
     var body: some View {
         let pool = store.claude
         let stale = pool == nil || pool?.level == .stale
-        let constrained = pool?.availability.needsAttention == true
+        let constrained = pool?.headroomWarning == true
         HStack(spacing: 3) {
             if constrained {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
@@ -84,7 +84,7 @@ struct MenuLabel: View {
                 (pool?.long?.used ?? 0, stale ? .stale : constrained ? .over : pool?.long?.level ?? .stale),
             ]))
         }
-        .help(constrained ? "Claude: every account is near or at a quota limit" : "Claude pooled quota: 5-hour / weekly")
+        .help(constrained ? "Claude: quota headroom is running out" : "Claude pooled quota: 5-hour / weekly")
     }
 
     /// Two stacked mini bars: 5h on top, weekly below. Fill = pool used, colour = verdict.
@@ -161,6 +161,11 @@ enum Notifier {
         content.title = "\(alert.provider.capitalized) \(window) pool is running out"
         content.body = "At this pace it is empty \(when(alert.emptyAt, now: now)). "
             + (alert.short ? "Slow down or take a break until the next reset." : "Spread the work or it runs dry before the reset.")
+        if alert.joint {
+            content.title = "\(alert.provider.capitalized) quota headroom is running out"
+            content.body = "No account is projected to have room in both windows \(when(alert.emptyAt, now: now))."
+            if let reset = alert.recoversAt { content.body += " Headroom returns \(when(reset, now: now))." }
+        }
         content.sound = .default
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: alert.key, content: content, trigger: nil)) { error in

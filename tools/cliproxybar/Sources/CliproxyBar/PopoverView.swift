@@ -50,6 +50,15 @@ struct PoolSection: View {
                 Text("Last sample \(duration(pool.dataAge)) ago — is the proxy running?")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if pool.level != .stale, let gap = pool.forecast?.firstGap, !pool.availability.needsAttention {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Headroom runs out \(when(gap.start, now: now))", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    if let reset = gap.end { Text("Returns \(when(reset, now: now)).") }
+                    Text("The forecast spends both quota windows on the same account. Fallback quota may still work.")
+                        .foregroundStyle(.secondary)
+                }.font(.caption)
+            }
             if pool.availability.needsAttention {
                 VStack(alignment: .leading, spacing: 4) {
                     Label(pool.availability == .exhausted ? "Every account has a full quota window."
@@ -61,7 +70,7 @@ struct PoolSection: View {
                     if let reset = pool.headroomAt {
                         Text("Headroom returns \(when(reset, now: now)), assuming no further usage.")
                     }
-                    Text("The totals below treat each window separately. Spare quota on different seats cannot be combined.")
+                    Text("The forecast spends both windows together. Spare quota on different seats cannot be combined.")
                         .foregroundStyle(.secondary)
                 }
                 .font(.caption)
@@ -78,8 +87,8 @@ struct PoolSection: View {
             }
             ForEach(pool.accounts) {
                 AccountView(account: $0, now: now,
-                            shortPool: pool.availability.needsAttention ? .over : pool.short?.level ?? pool.level,
-                            longPool: pool.availability.needsAttention ? .over : pool.long?.level ?? pool.level)
+                            shortPool: pool.headroomWarning ? .over : pool.short?.level ?? pool.level,
+                            longPool: pool.headroomWarning ? .over : pool.long?.level ?? pool.level)
             }
         }
     }
@@ -87,6 +96,7 @@ struct PoolSection: View {
     private var headline: String {
         if pool.availability == .exhausted { return "Quota exhausted" }
         if pool.availability == .constrained { return "No safe headroom" }
+        if pool.headroomWarning { return "Headroom running out" }
         return switch pool.level {
         case .ok: "Within limits"
         case .watch: "Getting tight"
@@ -119,9 +129,9 @@ struct PoolWindowView: View {
 
     private var verdict: String {
         if let empty = window.emptyAt {
-            return "\(window.learned ? rhythmLead : "At this pace") the pool runs out \(when(empty, now: now))"
+            return "\(window.learned ? rhythmLead : "At this pace") headroom runs out \(when(empty, now: now))"
         }
-        return "Lasts until the resets — lowest point \(pct(window.lowestLeft)) left"
+        return "Lowest projected quota — \(pct(window.lowestLeft)) left"
     }
 
     private var burn: String {

@@ -322,9 +322,9 @@ private func squeezedPool(now: Date, aShort: Double = 0, aLong: Double = 0.99,
 @Test func splitLimitsOverrideHealthyIndependentPools() {
     let now = Date(timeIntervalSince1970: 100_000)
     let pool = squeezedPool(now: now)
-    // With no measured burn, both independent projections claim the pool lasts.
-    #expect(pool.short?.emptyAt == nil)
-    #expect(pool.long?.emptyAt == nil)
+    // Even without measured burn, the joint projections report current lost headroom.
+    #expect(pool.short?.emptyAt == now)
+    #expect(pool.long?.emptyAt == now)
     #expect(pool.short?.used == 46)
     #expect(pool.availability == .constrained)
     #expect(pool.level == .over)
