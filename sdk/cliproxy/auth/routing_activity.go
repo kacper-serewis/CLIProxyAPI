@@ -57,6 +57,7 @@ type RoutingCandidate struct {
 	LongReset   time.Time         `json:"long_reset,omitempty"`
 	ShortUsage  float64           `json:"short_usage"`
 	Saturated   bool              `json:"saturated"`
+	Reserved    bool              `json:"reserved"`
 	Unavailable bool              `json:"unavailable"`
 	RetryAfter  time.Time         `json:"retry_after,omitempty"`
 }
@@ -243,12 +244,15 @@ func (m *Manager) RoutingQueue(provider string, now time.Time) []RoutingCandidat
 		return m.adaptiveRoutingQueue(cfg.Routing.HomeAccount, provider, now)
 	}
 	var ranks []soonestResetRank
+	var auths []*Auth
 	for _, auth := range m.List() {
 		if auth == nil || auth.Disabled || !strings.EqualFold(auth.Provider, provider) {
 			continue
 		}
 		ranks = append(ranks, rankSoonestReset(auth, len(ranks), now))
+		auths = append(auths, auth)
 	}
+	markSoonestResetReserves(ranks, newSoonestResetDemand(m.adaptiveHistory, auths, now), now)
 	unavailable := func(auth *Auth) bool { return auth.Unavailable && auth.NextRetryAfter.After(now) }
 	sort.SliceStable(ranks, func(i, j int) bool {
 		if a, b := unavailable(ranks[i].auth), unavailable(ranks[j].auth); a != b {
@@ -263,6 +267,7 @@ func (m *Manager) RoutingQueue(provider string, now time.Time) []RoutingCandidat
 			Known:       rank.known,
 			ShortUsage:  rank.shortUsage,
 			Saturated:   rank.saturated,
+			Reserved:    rank.reserved && !rank.saturated,
 			Unavailable: unavailable(rank.auth),
 		}
 		if rank.known {

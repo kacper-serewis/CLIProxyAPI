@@ -241,6 +241,150 @@ func TestSoonestResetKeepsHeadroomForOneUser(t *testing.T) {
 	}
 }
 
+// soonestResetHistory records three days in which each credential burned perHour of its
+// week every hour, so the forecast for the next n hours is n * perHour per credential.
+func soonestResetHistory(now time.Time, perHour float64, ids ...string) *quotaDemandHistory {
+	history := &quotaDemandHistory{}
+	const step = 10 * time.Minute
+	start := now.Add(-72 * time.Hour)
+	reset := now.Add(24 * time.Hour).Unix()
+	for _, id := range ids {
+		points := make([]QuotaHistoryPoint, 0, 72*6+1)
+		for at := start; !at.After(now); at = at.Add(step) {
+			points = append(points, QuotaHistoryPoint{
+				At: at.Unix(), Observed: at.Unix(), Auth: id, Provider: "claude",
+				LongUsed: perHour * at.Sub(start).Hours(), LongReset: reset,
+			})
+		}
+		history.add(points, now)
+	}
+	return history
+}
+
+// The soonest-reset credential keeps the last 15 points of its week for overflow: new
+// sessions go elsewhere while another credential has room and come back when that one's 5h
+// window is full. The reserve is released once the usage expected before the weekly reset
+// is at most twice what is left, so it is spent instead of expiring.
+func TestSoonestResetKeepsWeeklyReserveForOverflow(t *testing.T) {
+	now := time.Now()
+	// Two credentials at 1 point an hour each: 40 points expected over the next 20 hours.
+	selector := &SoonestResetSelector{history: soonestResetHistory(now, 0.01, "soon", "late")}
+	pick := func(auths ...*Auth) string {
+		t.Helper()
+		picked, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() error = %v", err)
+		}
+		return picked.ID
+	}
+	soon := func(longUsage float64) *Auth { return claudeQuotaAuth("soon", now, 20*time.Hour, longUsage, 0.10) }
+	late := claudeQuotaAuth("late", now, 4*24*time.Hour, 0.10, 0.10)
+
+	if got := pick(soon(0.83), late); got != "soon" {
+		t.Fatalf("below the reserve Pick() = %q, want soon", got)
+	}
+	if got := pick(soon(0.84), late); got != "late" {
+		t.Fatalf("in the reserve Pick() = %q, want late", got)
+	}
+	// The other credential's 5h window is full: the reserve takes the overflow.
+	lateFull := claudeQuotaAuth("late", now, 4*24*time.Hour, 0.10, 0.92)
+	if got := pick(soon(0.90), lateFull); got != "soon" {
+		t.Fatalf("overflow Pick() = %q, want soon", got)
+	}
+	// 12 points expected in the last 6 hours: 9 points left are released, 5 are still kept.
+	if got := pick(claudeQuotaAuth("soon", now, 6*time.Hour, 0.90, 0.10), late); got != "soon" {
+		t.Fatalf("released reserve Pick() = %q, want soon", got)
+	}
+	if got := pick(claudeQuotaAuth("soon", now, 6*time.Hour, 0.94, 0.10), late); got != "late" {
+		t.Fatalf("reserve of 5 points with 12 expected Pick() = %q, want late", got)
+	}
+	// With every credential in its reserve the soonest reset still wins.
+	lateReserved := claudeQuotaAuth("late", now, 4*24*time.Hour, 0.90, 0.10)
+	if got := pick(soon(0.90), lateReserved); got != "soon" {
+		t.Fatalf("all-reserved Pick() = %q, want soon", got)
+	}
+
+	ranks := []soonestResetRank{rankSoonestReset(soon(0.90), 0, now), rankSoonestReset(soon(0.99), 1, now)}
+	markSoonestResetReserves(ranks, selector.demandFor([]*Auth{soon(0.90), late}, now), now)
+	if !ranks[0].reserved || ranks[0].saturated {
+		t.Fatalf("rank at 90%% weekly = reserved %t saturated %t, want reserved only", ranks[0].reserved, ranks[0].saturated)
+	}
+	if ranks[1].reserved {
+		t.Fatal("a saturated credential was also marked reserved")
+	}
+}
+
+// Without enough history there is no forecast, and no reserve: holding quota back blind
+// would let it expire.
+func TestSoonestResetKeepsNoReserveWithoutAForecast(t *testing.T) {
+	now := time.Now()
+	soon := claudeQuotaAuth("soon", now, 20*time.Hour, 0.90, 0.10)
+	late := claudeQuotaAuth("late", now, 4*24*time.Hour, 0.10, 0.10)
+	if got := pickSoonestReset(t, soon, late); got != "soon" {
+		t.Fatalf("no history Pick() = %q, want soon", got)
+	}
+	short := &quotaDemandHistory{}
+	short.add([]QuotaHistoryPoint{
+		{At: now.Add(-20 * time.Minute).Unix(), Observed: now.Add(-20 * time.Minute).Unix(), Auth: "soon", Provider: "claude", LongUsed: 0.80, LongReset: now.Add(20 * time.Hour).Unix()},
+		{At: now.Add(-10 * time.Minute).Unix(), Observed: now.Add(-10 * time.Minute).Unix(), Auth: "soon", Provider: "claude", LongUsed: 0.90, LongReset: now.Add(20 * time.Hour).Unix()},
+	}, now)
+	picked, err := (&SoonestResetSelector{history: short}).Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, []*Auth{soon, late})
+	if err != nil || picked.ID != "soon" {
+		t.Fatalf("short history Pick() = %v, %v; want soon", picked, err)
+	}
+	// A disabled credential's past usage is not demand on the ones that are left.
+	disabled := claudeQuotaAuth("old", now, 3*24*time.Hour, 0.10, 0.10)
+	disabled.Disabled = true
+	if newSoonestResetDemand(soonestResetHistory(now, 0.01, "old"), []*Auth{disabled, soon}, now) != nil {
+		t.Fatal("a disabled credential's history produced a forecast")
+	}
+}
+
+// A session bound to a credential in its weekly reserve stays (prompt cache), and a session
+// drained off a full 5h window may use another credential's reserve.
+func TestSoonestResetReserveKeepsBindingsAndTakesDrains(t *testing.T) {
+	now := time.Now()
+	fallback := &SoonestResetSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+	attachAdaptiveHistory(selector, soonestResetHistory(now, 0.01, "soon", "late"))
+	if fallback.history == nil {
+		t.Fatal("the quota history was not attached to the soonest-reset selector")
+	}
+
+	pick := func(session string, auths ...*Auth) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{
+			Headers:  map[string][]string{"X-Claude-Code-Session-Id": {session}},
+			Metadata: make(map[string]any),
+		}
+		picked, err := selector.Pick(context.Background(), "claude", "claude-sonnet-5-5", opts, auths)
+		if err != nil {
+			t.Fatalf("Pick(%s) error = %v", session, err)
+		}
+		return picked.ID
+	}
+
+	late := claudeQuotaAuth("late", now, 4*24*time.Hour, 0.10, 0.10)
+	if got := pick("sess-1", claudeQuotaAuth("soon", now, 20*time.Hour, 0.80, 0.10), late); got != "soon" {
+		t.Fatalf("cold bind = %q, want soon", got)
+	}
+	reserved := claudeQuotaAuth("soon", now, 20*time.Hour, 0.90, 0.10)
+	if got := pick("sess-1", reserved, late); got != "soon" {
+		t.Fatalf("bound session left the reserved credential for %q", got)
+	}
+	if got := pick("sess-2", reserved, late); got != "late" {
+		t.Fatalf("new session = %q, want late", got)
+	}
+	lateFull := claudeQuotaAuth("late", now, 4*24*time.Hour, 0.12, 0.97)
+	if got := pick("sess-2", reserved, lateFull); got != "soon" {
+		t.Fatalf("drained session = %q, want the reserve on soon", got)
+	}
+}
+
 func TestClaudeUsagePollingRunsForQuotaStrategies(t *testing.T) {
 	for strategy, want := range map[string]bool{
 		"adaptive-reserve": true, " Soonest-Reset ": true, "fill-first": false, "round-robin": false, "": false,

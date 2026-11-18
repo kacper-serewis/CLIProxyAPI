@@ -88,6 +88,8 @@ func attachAdaptiveHistory(selector Selector, history *quotaDemandHistory) {
 	switch s := selector.(type) {
 	case *AdaptiveReserveSelector:
 		s.history = history
+	case *SoonestResetSelector:
+		s.history = history
 	case *SessionAffinitySelector:
 		attachAdaptiveHistory(s.fallback, history)
 	}
