@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,16 +229,16 @@ func TestSoonestResetKeepsHeadroomForOneUser(t *testing.T) {
 	now := time.Now()
 	// A single user's credentials are used up to 90% short / 99% weekly before new
 	// sessions avoid them, and established sessions drain only at 95% short.
-	if rankSoonestReset(claudeQuotaAuth("a", now, time.Hour, 0.98, 0.89), 0, now).saturated {
+	if rankSoonestReset(claudeQuotaAuth("a", now, time.Hour, 0.98, 0.89), 0, now, "").saturated {
 		t.Fatal("credential at 89% short / 98% weekly was demoted")
 	}
-	if !rankSoonestReset(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.90), 0, now).saturated {
+	if !rankSoonestReset(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.90), 0, now, "").saturated {
 		t.Fatal("credential at 90% short was not demoted for new sessions")
 	}
-	if soonestResetDraining(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.94), now) {
+	if soonestResetDraining(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.94), now, "") {
 		t.Fatal("credential at 94% short drained established sessions")
 	}
-	if !soonestResetDraining(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.95), now) {
+	if !soonestResetDraining(claudeQuotaAuth("a", now, time.Hour, 0.40, 0.95), now, "") {
 		t.Fatal("credential at 95% short did not drain established sessions")
 	}
 }
@@ -304,8 +306,8 @@ func TestSoonestResetKeepsWeeklyReserveForOverflow(t *testing.T) {
 		t.Fatalf("all-reserved Pick() = %q, want soon", got)
 	}
 
-	ranks := []soonestResetRank{rankSoonestReset(soon(0.90), 0, now), rankSoonestReset(soon(0.99), 1, now)}
-	markSoonestResetReserves(ranks, selector.demandFor([]*Auth{soon(0.90), late}, now), now)
+	ranks := []soonestResetRank{rankSoonestReset(soon(0.90), 0, now, ""), rankSoonestReset(soon(0.99), 1, now, "")}
+	markSoonestResetReserves(ranks, selector.demandFor([]*Auth{soon(0.90), late}, now, false), nil, now)
 	if !ranks[0].reserved || ranks[0].saturated {
 		t.Fatalf("rank at 90%% weekly = reserved %t saturated %t, want reserved only", ranks[0].reserved, ranks[0].saturated)
 	}
@@ -335,7 +337,7 @@ func TestSoonestResetKeepsNoReserveWithoutAForecast(t *testing.T) {
 	// A disabled credential's past usage is not demand on the ones that are left.
 	disabled := claudeQuotaAuth("old", now, 3*24*time.Hour, 0.10, 0.10)
 	disabled.Disabled = true
-	if newSoonestResetDemand(soonestResetHistory(now, 0.01, "old"), []*Auth{disabled, soon}, now) != nil {
+	if newSoonestResetDemand(soonestResetHistory(now, 0.01, "old"), []*Auth{disabled, soon}, now, false) != nil {
 		t.Fatal("a disabled credential's history produced a forecast")
 	}
 }
@@ -382,6 +384,194 @@ func TestSoonestResetReserveKeepsBindingsAndTakesDrains(t *testing.T) {
 	lateFull := claudeQuotaAuth("late", now, 4*24*time.Hour, 0.12, 0.97)
 	if got := pick("sess-2", reserved, lateFull); got != "soon" {
 		t.Fatalf("drained session = %q, want the reserve on soon", got)
+	}
+}
+
+// withFableWindow adds the Fable-only weekly window to a credential's quota signals.
+func withFableWindow(auth *Auth, now time.Time, resetIn time.Duration, usage float64) *Auth {
+	auth.Quota.Signals[claudeFableSignalPrefix+"Reset"] = strconv.FormatInt(now.Add(resetIn).Unix(), 10)
+	auth.Quota.Signals[claudeFableSignalPrefix+"Utilization"] = strconv.FormatFloat(usage, 'f', 2, 64)
+	auth.Quota.Signals[claudeFableSignalPrefix+"Status"] = "allowed"
+	return auth
+}
+
+// A seat that is out of its Fable-only weekly window still serves other models: new Fable
+// sessions skip it without first failing there, and a Fable session bound to it moves.
+func TestSoonestResetFableWindowOnlyBlocksFableModels(t *testing.T) {
+	now := time.Now()
+	const fable, opus = "claude-fable-5-2", "claude-opus-5-5"
+	pick := func(selector Selector, session, model string, auths ...*Auth) string {
+		t.Helper()
+		opts := cliproxyexecutor.Options{Metadata: make(map[string]any)}
+		if session != "" {
+			opts.Headers = map[string][]string{"X-Claude-Code-Session-Id": {session}}
+		}
+		picked, err := selector.Pick(context.Background(), "claude", model, opts, auths)
+		if err != nil {
+			t.Fatalf("Pick(%s, %s) error = %v", session, model, err)
+		}
+		return picked.ID
+	}
+	soon := func(fableUsage float64) *Auth {
+		return withFableWindow(claudeQuotaAuth("soon", now, 20*time.Hour, 0.60, 0.10), now, 20*time.Hour, fableUsage)
+	}
+	late := withFableWindow(claudeQuotaAuth("late", now, 4*24*time.Hour, 0.10, 0.10), now, 4*24*time.Hour, 0.20)
+	plain := &SoonestResetSelector{}
+
+	if got := pick(plain, "", fable, soon(0.98), late); got != "soon" {
+		t.Fatalf("Fable at 98%% = %q, want soon", got)
+	}
+	if got := pick(plain, "", fable, soon(0.99), late); got != "late" {
+		t.Fatalf("Fable with the Fable window full = %q, want late", got)
+	}
+	if got := pick(plain, "", opus, soon(0.99), late); got != "soon" {
+		t.Fatalf("Opus with the Fable window full = %q, want soon", got)
+	}
+	// A rejection seen in the response headers counts whatever the reported usage.
+	rejected := soon(0.70)
+	rejected.Quota.Signals[claudeFableSignalPrefix+"Status"] = "rejected"
+	if got := pick(plain, "", fable, rejected, late); got != "late" {
+		t.Fatalf("Fable after a Fable rejection = %q, want late", got)
+	}
+	// Once the window has rolled over the old reading no longer applies.
+	rolled := withFableWindow(claudeQuotaAuth("soon", now, 20*time.Hour, 0.60, 0.10), now, -time.Hour, 1)
+	if got := pick(plain, "", fable, rolled, late); got != "soon" {
+		t.Fatalf("Fable after the window reset = %q, want soon", got)
+	}
+
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &SoonestResetSelector{}, TTL: time.Hour})
+	defer affinity.Stop()
+	if got := pick(affinity, "fable-chat", fable, soon(0.50), late); got != "soon" {
+		t.Fatalf("Fable cold bind = %q, want soon", got)
+	}
+	if got := pick(affinity, "opus-chat", opus, soon(0.50), late); got != "soon" {
+		t.Fatalf("Opus cold bind = %q, want soon", got)
+	}
+	if got := pick(affinity, "fable-chat", fable, soon(1), late); got != "late" {
+		t.Fatalf("bound Fable session with the Fable window full = %q, want late", got)
+	}
+	if got := pick(affinity, "opus-chat", opus, soon(1), late); got != "soon" {
+		t.Fatalf("bound Opus session moved to %q, want soon", got)
+	}
+}
+
+// The Fable-only weekly window has its own reserve, from its own usage rhythm: only Fable
+// sessions keep away, and only once that window has been recorded for long enough.
+func TestSoonestResetFableWindowKeepsItsOwnReserve(t *testing.T) {
+	now := time.Now()
+	history := &quotaDemandHistory{}
+	const step = 10 * time.Minute
+	start := now.Add(-72 * time.Hour)
+	for _, id := range []string{"soon", "late"} {
+		var points []QuotaHistoryPoint
+		for at := start; !at.After(now); at = at.Add(step) {
+			hours := at.Sub(start).Hours()
+			points = append(points, QuotaHistoryPoint{
+				At: at.Unix(), Observed: at.Unix(), Auth: id, Provider: "claude",
+				LongUsed: 0.001 * hours, LongReset: now.Add(24 * time.Hour).Unix(),
+				FableUsed: 0.01 * hours, FableReset: now.Add(24 * time.Hour).Unix(),
+			})
+		}
+		history.add(points, now)
+	}
+	selector := &SoonestResetSelector{history: history}
+	pick := func(model string, auths ...*Auth) string {
+		t.Helper()
+		picked, err := selector.Pick(context.Background(), "claude", model, cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick(%s) error = %v", model, err)
+		}
+		return picked.ID
+	}
+	// 40 Fable points and 4 weekly points are expected over the next 20 hours.
+	soon := withFableWindow(claudeQuotaAuth("soon", now, 20*time.Hour, 0.50, 0.10), now, 20*time.Hour, 0.90)
+	late := withFableWindow(claudeQuotaAuth("late", now, 4*24*time.Hour, 0.10, 0.10), now, 4*24*time.Hour, 0.20)
+	if got := pick("claude-fable-5-2", soon, late); got != "late" {
+		t.Fatalf("Fable with the Fable window in its reserve = %q, want late", got)
+	}
+	if got := pick("claude-opus-5-5", soon, late); got != "soon" {
+		t.Fatalf("Opus with the Fable window in its reserve = %q, want soon", got)
+	}
+	lateFull := withFableWindow(claudeQuotaAuth("late", now, 4*24*time.Hour, 0.10, 0.92), now, 4*24*time.Hour, 0.20)
+	if got := pick("claude-fable-5-2", soon, lateFull); got != "soon" {
+		t.Fatalf("Fable overflow = %q, want the reserve on soon", got)
+	}
+	// Without Fable history there is no Fable forecast and no Fable reserve.
+	blind := &SoonestResetSelector{history: soonestResetHistory(now, 0.001, "soon", "late")}
+	picked, err := blind.Pick(context.Background(), "claude", "claude-fable-5-2", cliproxyexecutor.Options{}, []*Auth{soon, late})
+	if err != nil || picked.ID != "soon" {
+		t.Fatalf("Fable without Fable history = %v, %v; want soon", picked, err)
+	}
+}
+
+// The usage poll reads the Fable-only weekly window and the quota history records it.
+func TestSoonestResetFableWindowIsReadAndRecorded(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	week := now.Add(3 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	base := `"five_hour":{"utilization":10,"resets_at":"` + now.Add(time.Hour).UTC().Format(time.RFC3339) + `"},"seven_day":{"utilization":40,"resets_at":"` + week + `"}`
+	parse := func(extra string) map[string]string {
+		t.Helper()
+		signals, ok := parseAdaptiveUsage(strings.NewReader(`{`+base+extra+`}`), now)
+		if !ok {
+			t.Fatalf("parseAdaptiveUsage(%s) failed", extra)
+		}
+		return signals
+	}
+	scoped := func(percent string, active bool) string {
+		return `{"kind":"weekly_scoped","percent":` + percent + `,"resets_at":"` + week + `","is_active":` + strconv.FormatBool(active) + `,"scope":{"model":{"id":null,"display_name":"Fable"}}}`
+	}
+
+	signals := parse(`,"limits":[{"kind":"session","percent":10,"resets_at":"` + week + `","scope":null},` + scoped("64", true) + `]`)
+	if got := signals[claudeFableSignalPrefix+"Utilization"]; got != "0.640000" {
+		t.Fatalf("Fable utilization = %q, want 0.640000", got)
+	}
+	if got := signals[claudeFableSignalPrefix+"Status"]; got != "allowed" {
+		t.Fatalf("Fable status = %q, want allowed", got)
+	}
+	if got := parse(`,"limits":[` + scoped("100", true) + `]`)[claudeFableSignalPrefix+"Status"]; got != "rejected" {
+		t.Fatalf("full Fable window status = %q, want rejected", got)
+	}
+	// The legacy field counts unless it is the dollar-denominated credit pool.
+	if got := parse(`,"iguana_necktie":{"utilization":30,"resets_at":"` + week + `"}`)[claudeFableSignalPrefix+"Utilization"]; got != "0.300000" {
+		t.Fatalf("legacy Fable utilization = %q, want 0.300000", got)
+	}
+	for _, extra := range []string{``, `,"limits":null`, `,"iguana_necktie":{"utilization":5,"resets_at":"` + week + `","limit_dollars":100}`,
+		`,"limits":[{"kind":"weekly_scoped","percent":50,"resets_at":"` + week + `","scope":{"model":{"display_name":"Opus"}}}]`,
+		`,"limits":[{"kind":"weekly_scoped","percent":0,"resets_at":null,"scope":{"model":{"display_name":"Fable"}}}]`} {
+		if _, found := parse(extra)[claudeFableSignalPrefix+"Reset"]; found {
+			t.Fatalf("payload %s produced a Fable window", extra)
+		}
+	}
+
+	// A later observation without the Fable window keeps the last reading until its reset.
+	quota := QuotaState{ObservedAt: now, Signals: signals}
+	opus := http.Header{}
+	opus.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.11")
+	opus.Set("Anthropic-Ratelimit-Unified-5h-Reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10))
+	opus.Set("Anthropic-Ratelimit-Unified-7d-Utilization", "0.41")
+	opus.Set("Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(now.Add(3*24*time.Hour).Unix(), 10))
+	if !quota.ObserveResponseHeadersForProvider("claude", opus, now.Add(time.Minute)) {
+		t.Fatal("the response headers were not observed")
+	}
+	if window, found := claudeFableWindow(quota.Signals); !found || window.usage != 0.64 || quota.Signals["Anthropic-Ratelimit-Unified-7d-Utilization"] != "0.41" {
+		t.Fatalf("signals after a response without the Fable window = %v", quota.Signals)
+	}
+	if !quota.ObserveResponseHeadersForProvider("claude", opus, now.Add(4*24*time.Hour)) {
+		t.Fatal("the response headers were not observed")
+	}
+	if _, found := claudeFableWindow(quota.Signals); found {
+		t.Fatal("the Fable reading outlived its reset")
+	}
+
+	auth := &Auth{ID: "a", Provider: "claude", Quota: QuotaState{ObservedAt: now, Signals: signals}}
+	point, ok := quotaHistoryPointFor(auth, now)
+	if !ok || point.FableUsed != 0.64 || point.FableReset != now.Add(3*24*time.Hour).Unix() {
+		t.Fatalf("history point = %+v, %t; want Fable 0.64 until the weekly reset", point, ok)
+	}
+	later := point
+	later.FableUsed = 0.65
+	if sameQuotaObservation(point, later) {
+		t.Fatal("a change in the Fable window alone was not recorded")
 	}
 }
 

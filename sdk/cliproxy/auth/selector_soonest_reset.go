@@ -45,6 +45,10 @@ const (
 	soonestResetDemandWindow = 14 * 24 * time.Hour
 	// soonestResetDemandTTL bounds how often the usage rhythm is rebuilt from the history.
 	soonestResetDemandTTL = 2 * time.Minute
+	// claudeFableSignalPrefix names the Fable-only weekly window in the quota signals. Each
+	// seat has one next to its week, with the same reset; it fills about twice as fast as
+	// the week when only Fable is used, and a seat that is out of it still serves Opus.
+	claudeFableSignalPrefix = "Anthropic-Ratelimit-Unified-7d_oi-"
 	// soonestResetTieBucket groups long-window resets that are this close together so the
 	// short-window utilization can break the tie.
 	soonestResetTieBucket = time.Minute
@@ -60,7 +64,8 @@ const (
 //     by the lower short-window utilization.
 //  3. Credentials in their weekly reserve (see soonestResetLongWindowReserve), kept for
 //     overflow from the ones above.
-//  4. Credentials whose short or long window is saturated or rejected.
+//  4. Credentials whose short or long window is saturated or rejected. For a Fable model
+//     that includes the Fable-only weekly window, which also has its own reserve.
 //
 // Quota observations come from upstream response headers recorded on Auth.Quota.Signals
 // (Anthropic unified rate-limit headers and Codex x-codex-* headers). When wrapped by
@@ -70,10 +75,13 @@ type SoonestResetSelector struct {
 	// history feeds the usage forecast behind the weekly reserve; nil keeps no reserve.
 	history *quotaDemandHistory
 
-	demandMu  sync.Mutex
-	demandKey string
-	demandAt  time.Time
-	demand    *soonestResetDemand
+	demandMu sync.Mutex
+	demands  map[string]soonestResetDemandEntry
+}
+
+type soonestResetDemandEntry struct {
+	at     time.Time
+	demand *soonestResetDemand
 }
 
 type soonestResetRank struct {
@@ -85,6 +93,47 @@ type soonestResetRank struct {
 	longReset  time.Time
 	longUsage  float64
 	shortUsage float64
+	// Set for a Fable model on a credential that reports its Fable-only weekly window.
+	fableKnown bool
+	fableReset time.Time
+	fableUsage float64
+}
+
+// carryClaudeFableWindow keeps the last reading of the Fable-only weekly window when a new
+// observation does not report it: only responses to Fable requests and the usage poll do,
+// while every observation replaces the whole snapshot. The reading lapses at its reset.
+func carryClaudeFableWindow(previous, next map[string]string, now time.Time) {
+	if next == nil {
+		return
+	}
+	if _, reported := signalValue(next, claudeFableSignalPrefix+"Reset"); reported {
+		return
+	}
+	if window, ok := claudeFableWindow(previous); !ok || !window.reset.After(now) {
+		return
+	}
+	for _, name := range []string{"Reset", "Utilization", "Status"} {
+		if value, ok := signalValue(previous, claudeFableSignalPrefix+name); ok {
+			next[claudeFableSignalPrefix+name] = value
+		}
+	}
+}
+
+// soonestResetUsesFableWindow reports whether requests for the model count against the
+// Fable-only weekly window.
+func soonestResetUsesFableWindow(model string) bool {
+	return strings.Contains(strings.ToLower(model), "fable")
+}
+
+// claudeFableWindow reads the Fable-only weekly window from the quota signals.
+func claudeFableWindow(signals map[string]string) (quotaWindow, bool) {
+	reset, ok := signalUnixTime(signals, claudeFableSignalPrefix+"Reset")
+	if !ok {
+		return quotaWindow{}, false
+	}
+	usage, _ := signalFloat(signals, claudeFableSignalPrefix+"Utilization")
+	status, _ := signalValue(signals, claudeFableSignalPrefix+"Status")
+	return quotaWindow{long: true, reset: reset, usage: usage, rejected: strings.EqualFold(status, "rejected")}, true
 }
 
 // soonestResetDemand is the usage rhythm of a set of credentials: the share of one weekly
@@ -95,9 +144,10 @@ type soonestResetDemand struct {
 
 // newSoonestResetDemand learns the rhythm from the last soonestResetDemandWindow of quota
 // history, the way the panel and menu bar do: only new highs within a weekly window count
-// as usage (readings jitter), and time without samples counts as idle. It returns nil
-// until one of the credentials has enough history.
-func newSoonestResetDemand(history *quotaDemandHistory, auths []*Auth, now time.Time) *soonestResetDemand {
+// as usage (readings jitter), and time without samples counts as idle. With fable it is
+// the rhythm of the Fable-only weekly window. It returns nil until one of the credentials
+// has enough history.
+func newSoonestResetDemand(history *quotaDemandHistory, auths []*Auth, now time.Time, fable bool) *soonestResetDemand {
 	if history == nil {
 		return nil
 	}
@@ -108,32 +158,39 @@ func newSoonestResetDemand(history *quotaDemandHistory, auths []*Auth, now time.
 		if auth == nil || auth.Disabled {
 			continue
 		}
-		points := history.snapshot(auth.ID)
-		for len(points) > 0 && points[0].Observed < since {
-			points = points[1:]
+		type sample struct {
+			observed, reset int64
+			used            float64
 		}
-		if len(points) < 2 {
+		var samples []sample
+		for _, point := range history.snapshot(auth.ID) {
+			item := sample{point.Observed, point.LongReset, point.LongUsed}
+			if fable {
+				item = sample{point.Observed, point.FableReset, point.FableUsed}
+			}
+			if item.reset != 0 && item.observed >= since && item.observed <= now.Unix() {
+				samples = append(samples, item)
+			}
+		}
+		if len(samples) < 2 {
 			continue
 		}
-		first := time.Unix(points[0].Observed, 0).In(now.Location())
+		first := time.Unix(samples[0].observed, 0).In(now.Location())
 		if now.Sub(first).Hours() < soonestResetDemandMinHours {
 			continue
 		}
 		learned = true
 		var used, hours [2][24]float64
-		high, window := points[0].LongUsed, points[0].LongReset
-		for _, point := range points[1:] {
-			if point.LongReset == 0 || point.Observed > now.Unix() {
-				continue
-			}
+		high, window := samples[0].used, samples[0].reset
+		for _, item := range samples[1:] {
 			// Reset timestamps jitter by a second or two within the same window.
-			if math.Abs(float64(point.LongReset-window)) > 2 {
-				high, window = 0, point.LongReset
+			if math.Abs(float64(item.reset-window)) > 2 {
+				high, window = 0, item.reset
 			}
-			if point.LongUsed > high {
-				at := time.Unix(point.Observed, 0).In(now.Location())
-				used[dayKind(at)][at.Hour()] += point.LongUsed - high
-				high = point.LongUsed
+			if item.used > high {
+				at := time.Unix(item.observed, 0).In(now.Location())
+				used[dayKind(at)][at.Hour()] += item.used - high
+				high = item.used
 			}
 		}
 		// Every hour on the clock since the first sample counts, used or not.
@@ -174,7 +231,7 @@ func (d *soonestResetDemand) until(now, until time.Time) float64 {
 	return total
 }
 
-func (s *SoonestResetSelector) demandFor(auths []*Auth, now time.Time) *soonestResetDemand {
+func (s *SoonestResetSelector) demandFor(auths []*Auth, now time.Time, fable bool) *soonestResetDemand {
 	if s == nil || s.history == nil {
 		return nil
 	}
@@ -186,27 +243,39 @@ func (s *SoonestResetSelector) demandFor(auths []*Auth, now time.Time) *soonestR
 	}
 	sort.Strings(ids)
 	key := strings.Join(ids, "\x00")
+	if fable {
+		key += "\x00fable"
+	}
 	s.demandMu.Lock()
 	defer s.demandMu.Unlock()
-	if key != s.demandKey || now.Sub(s.demandAt) > soonestResetDemandTTL || now.Before(s.demandAt) {
-		s.demandKey, s.demandAt = key, now
-		s.demand = newSoonestResetDemand(s.history, auths, now)
+	entry, ok := s.demands[key]
+	if !ok || now.Sub(entry.at) > soonestResetDemandTTL || now.Before(entry.at) {
+		if s.demands == nil || len(s.demands) > 16 {
+			s.demands = make(map[string]soonestResetDemandEntry)
+		}
+		entry = soonestResetDemandEntry{at: now, demand: newSoonestResetDemand(s.history, auths, now, fable)}
+		s.demands[key] = entry
 	}
-	return s.demand
+	return entry.demand
 }
 
-// markSoonestResetReserves flags the credentials that are in their weekly reserve.
-func markSoonestResetReserves(ranks []soonestResetRank, demand *soonestResetDemand, now time.Time) {
-	if demand == nil {
-		return
+// markSoonestResetReserves flags the credentials that are in their weekly reserve, or for
+// a Fable model in the reserve of their Fable-only weekly window. Either forecast may be
+// nil, which keeps no reserve on that window.
+func markSoonestResetReserves(ranks []soonestResetRank, week, fable *soonestResetDemand, now time.Time) {
+	held := func(demand *soonestResetDemand, usage float64, reset time.Time) bool {
+		if demand == nil || usage < soonestResetLongWindowReserve {
+			return false
+		}
+		return demand.until(now, reset) > soonestResetReserveCover*(soonestResetLongWindowSaturation-usage)
 	}
 	for i := range ranks {
 		rank := &ranks[i]
-		if !rank.known || rank.saturated || rank.longUsage < soonestResetLongWindowReserve {
+		if rank.saturated {
 			continue
 		}
-		left := soonestResetLongWindowSaturation - rank.longUsage
-		rank.reserved = demand.until(now, rank.longReset) > soonestResetReserveCover*left
+		rank.reserved = (rank.known && held(week, rank.longUsage, rank.longReset)) ||
+			(rank.fableKnown && held(fable, rank.fableUsage, rank.fableReset))
 	}
 }
 
@@ -225,10 +294,14 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 
 	ranks := make([]soonestResetRank, len(available))
 	for i, auth := range available {
-		ranks[i] = rankSoonestReset(auth, i, now)
+		ranks[i] = rankSoonestReset(auth, i, now, model)
 	}
 	// The rhythm covers every credential offered, so one in cooldown still counts as demand.
-	markSoonestResetReserves(ranks, s.demandFor(auths, now), now)
+	var fableDemand *soonestResetDemand
+	if soonestResetUsesFableWindow(model) {
+		fableDemand = s.demandFor(auths, now, true)
+	}
+	markSoonestResetReserves(ranks, s.demandFor(auths, now, false), fableDemand, now)
 	sort.SliceStable(ranks, func(i, j int) bool {
 		return soonestResetLess(ranks[i], ranks[j])
 	})
@@ -266,16 +339,17 @@ func soonestResetLess(a, b soonestResetRank) bool {
 	return a.index < b.index
 }
 
-func rankSoonestReset(auth *Auth, index int, now time.Time) soonestResetRank {
-	return rankSoonestResetWith(auth, index, now, soonestResetShortWindowSaturation)
+func rankSoonestReset(auth *Auth, index int, now time.Time, model string) soonestResetRank {
+	return rankSoonestResetWith(auth, index, now, soonestResetShortWindowSaturation, model)
 }
 
-// soonestResetDraining reports whether established sessions should leave the credential.
-func soonestResetDraining(auth *Auth, now time.Time) bool {
-	return rankSoonestResetWith(auth, 0, now, soonestResetShortWindowDrain).saturated
+// soonestResetDraining reports whether established sessions for the model should leave
+// the credential.
+func soonestResetDraining(auth *Auth, now time.Time, model string) bool {
+	return rankSoonestResetWith(auth, 0, now, soonestResetShortWindowDrain, model).saturated
 }
 
-func rankSoonestResetWith(auth *Auth, index int, now time.Time, shortSaturation float64) soonestResetRank {
+func rankSoonestResetWith(auth *Auth, index int, now time.Time, shortSaturation float64, model string) soonestResetRank {
 	rank := soonestResetRank{auth: auth, index: index}
 	if auth == nil || len(auth.Quota.Signals) == 0 {
 		return rank
@@ -313,6 +387,16 @@ func rankSoonestResetWith(auth *Auth, index int, now time.Time, shortSaturation 
 		rank.shortUsage = short.usage
 		if short.rejected || short.usage >= shortSaturation {
 			rank.saturated = true
+		}
+	}
+	if soonestResetUsesFableWindow(model) {
+		if fable, ok := claudeFableWindow(signals); ok && fable.reset.After(now) {
+			rank.fableKnown = true
+			rank.fableReset = fable.reset
+			rank.fableUsage = fable.usage
+			if fable.rejected || fable.usage >= soonestResetLongWindowSaturation {
+				rank.saturated = true
+			}
 		}
 	}
 	return rank

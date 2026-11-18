@@ -1735,10 +1735,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		var safe func(*Auth) bool
 		switch fallback := s.fallback.(type) {
 		case *SoonestResetSelector:
-			if !soonestResetDraining(bound, now) {
+			if !soonestResetDraining(bound, now, model) {
 				return nil
 			}
-			safe = func(a *Auth) bool { return !rankSoonestReset(a, 0, now).saturated }
+			safe = func(a *Auth) bool { return !rankSoonestReset(a, 0, now, model).saturated }
 		case *AdaptiveReserveSelector:
 			if !strings.EqualFold(bound.Provider, "claude") || !fallback.decision(bound, now).Draining {
 				return nil

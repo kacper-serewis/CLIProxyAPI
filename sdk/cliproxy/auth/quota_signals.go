@@ -49,6 +49,7 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 	if observedAt.IsZero() {
 		observedAt = time.Now()
 	}
+	carryClaudeFableWindow(q.Signals, next, observedAt)
 	q.Signals = next
 	q.ObservedAt = observedAt
 	return true

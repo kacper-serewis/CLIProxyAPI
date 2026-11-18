@@ -51,15 +51,20 @@ type RoutingSession struct {
 
 // RoutingCandidate describes a credential in the configured quota strategy’s new-session queue.
 type RoutingCandidate struct {
-	Adaptive    *AdaptiveDecision `json:"adaptive,omitempty"`
-	Auth        string            `json:"auth"`
-	Known       bool              `json:"known"`
-	LongReset   time.Time         `json:"long_reset,omitempty"`
-	ShortUsage  float64           `json:"short_usage"`
-	Saturated   bool              `json:"saturated"`
-	Reserved    bool              `json:"reserved"`
-	Unavailable bool              `json:"unavailable"`
-	RetryAfter  time.Time         `json:"retry_after,omitempty"`
+	Adaptive   *AdaptiveDecision `json:"adaptive,omitempty"`
+	Auth       string            `json:"auth"`
+	Known      bool              `json:"known"`
+	LongReset  time.Time         `json:"long_reset,omitempty"`
+	ShortUsage float64           `json:"short_usage"`
+	Saturated  bool              `json:"saturated"`
+	Reserved   bool              `json:"reserved"`
+	// The Fable-only weekly window, when the credential reports one: new Fable chats
+	// skip a credential that is out of it while other models still go there.
+	FableUsage     float64   `json:"fable_usage,omitempty"`
+	FableReset     time.Time `json:"fable_reset,omitempty"`
+	FableSaturated bool      `json:"fable_saturated,omitempty"`
+	Unavailable    bool      `json:"unavailable"`
+	RetryAfter     time.Time `json:"retry_after,omitempty"`
 }
 
 var routingActivity = struct {
@@ -249,10 +254,10 @@ func (m *Manager) RoutingQueue(provider string, now time.Time) []RoutingCandidat
 		if auth == nil || auth.Disabled || !strings.EqualFold(auth.Provider, provider) {
 			continue
 		}
-		ranks = append(ranks, rankSoonestReset(auth, len(ranks), now))
+		ranks = append(ranks, rankSoonestReset(auth, len(ranks), now, ""))
 		auths = append(auths, auth)
 	}
-	markSoonestResetReserves(ranks, newSoonestResetDemand(m.adaptiveHistory, auths, now), now)
+	markSoonestResetReserves(ranks, newSoonestResetDemand(m.adaptiveHistory, auths, now, false), nil, now)
 	unavailable := func(auth *Auth) bool { return auth.Unavailable && auth.NextRetryAfter.After(now) }
 	sort.SliceStable(ranks, func(i, j int) bool {
 		if a, b := unavailable(ranks[i].auth), unavailable(ranks[j].auth); a != b {
@@ -272,6 +277,11 @@ func (m *Manager) RoutingQueue(provider string, now time.Time) []RoutingCandidat
 		}
 		if rank.known {
 			candidate.LongReset = rank.longReset
+		}
+		if fable, ok := claudeFableWindow(rank.auth.Quota.Signals); ok && fable.reset.After(now) {
+			candidate.FableUsage = fable.usage
+			candidate.FableReset = fable.reset
+			candidate.FableSaturated = fable.rejected || fable.usage >= soonestResetLongWindowSaturation
 		}
 		if candidate.Unavailable {
 			candidate.RetryAfter = rank.auth.NextRetryAfter

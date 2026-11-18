@@ -49,6 +49,10 @@ type QuotaHistoryPoint struct {
 	LongReset  int64   `json:"long_reset"`
 	ShortUsed  float64 `json:"short_used,omitempty"`
 	ShortReset int64   `json:"short_reset,omitempty"`
+	// Claude's Fable-only weekly window, when the provider reports one. A reset without a
+	// usage value means nothing has been used.
+	FableUsed  float64 `json:"fable_used,omitempty"`
+	FableReset int64   `json:"fable_reset,omitempty"`
 }
 
 // QuotaHistoryPath returns the history file location for an auth directory.
@@ -133,6 +137,10 @@ func quotaHistoryPointFor(auth *Auth, now time.Time) (QuotaHistoryPoint, bool) {
 			point.ShortReset = w.reset.Unix()
 		}
 	}
+	if fable, ok := claudeFableWindow(auth.Quota.Signals); ok && fable.reset.After(now) {
+		point.FableUsed = roundQuotaUsage(fable.usage)
+		point.FableReset = fable.reset.Unix()
+	}
 	if auth.Quota.Signals["Adaptive-5h-Inactive"] == "true" {
 		point.ShortReset = 0
 	}
@@ -147,7 +155,8 @@ func roundQuotaUsage(usage float64) float64 {
 }
 
 func sameQuotaObservation(a, b QuotaHistoryPoint) bool {
-	return a.LongUsed == b.LongUsed && a.LongReset == b.LongReset && a.ShortUsed == b.ShortUsed && a.ShortReset == b.ShortReset
+	return a.LongUsed == b.LongUsed && a.LongReset == b.LongReset && a.ShortUsed == b.ShortUsed && a.ShortReset == b.ShortReset &&
+		a.FableUsed == b.FableUsed && a.FableReset == b.FableReset
 }
 
 func appendQuotaHistory(path string, points []QuotaHistoryPoint) {
