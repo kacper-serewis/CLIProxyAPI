@@ -10,13 +10,18 @@ public struct HistoryPoint: Decodable, Sendable, Equatable {
     public var long_reset: Double?
     public var short_used: Double?
     public var short_reset: Double?
+    /// Claude's Fable-only weekly window; a reset without a usage value means nothing used.
+    public var fable_used: Double?
+    public var fable_reset: Double?
 
     public init(t: Double, auth: String, provider: String = "claude",
                 long_used: Double? = nil, long_reset: Double? = nil,
-                short_used: Double? = nil, short_reset: Double? = nil, observed: Double? = nil) {
+                short_used: Double? = nil, short_reset: Double? = nil, observed: Double? = nil,
+                fable_used: Double? = nil, fable_reset: Double? = nil) {
         self.t = t; self.auth = auth; self.provider = provider
         self.long_used = long_used; self.long_reset = long_reset
         self.short_used = short_used; self.short_reset = short_reset; self.observed = observed
+        self.fable_used = fable_used; self.fable_reset = fable_reset
     }
 }
 
@@ -47,6 +52,10 @@ public struct AccountState: Sendable, Identifiable {
     public var long: WindowState?
     public var observedAt: Date
     public var nextChat = false
+    /// The Fable-only weekly window, next to the week and with the same reset. A seat that
+    /// is out of it still serves other models.
+    public var fable: WindowState?
+    public var fableOut: Bool { (fable?.used ?? 0) >= QuotaModel.newChatLongLimit }
     /// In its weekly reserve: new chats go to another seat while one has room.
     public var reserved = false
     /// Usage readings can jitter down without a reset. Keep availability conservative,
@@ -102,6 +111,9 @@ public struct PoolState: Sendable {
     public var longBurnRecent: Double
     public var dataAge: TimeInterval
     public var forecast: HeadroomForecast? = nil
+    /// The pooled Fable-only weekly windows, when the seats report them. Not part of `level`:
+    /// a pool that is out of Fable still serves other models.
+    public var fable: PoolWindow? = nil
     public var headroomWarning: Bool { availability.needsAttention || (dataAge <= QuotaModel.staleAfter && forecast?.firstGap != nil) }
     /// Current per-seat headroom, independent of the two pooled projections. Safety
     /// thresholds demote seats; the proxy can still try them as a last resort.
@@ -219,6 +231,36 @@ public enum QuotaModel {
         return ((p.long_used ?? 0) * 100, r)
     }
 
+    /// The Fable-only weekly window as long-window history: the points that report it, with
+    /// usage and reset taken from that window, so the functions for the week work on it.
+    static func fablePoints(_ points: [HistoryPoint]) -> [HistoryPoint] {
+        points.compactMap { p in
+            guard let reset = p.fable_reset, reset > 0 else { return nil }
+            return HistoryPoint(t: p.t, auth: p.auth, provider: p.provider,
+                                long_used: p.fable_used ?? 0, long_reset: reset, observed: p.observed)
+        }
+    }
+
+    /// How many Fable-window points one weekly point costs, from what the pool's accounts
+    /// burned in both windows since the Fable window is recorded. It follows the mix of
+    /// models in use and turns the weekly rhythm into Fable points.
+    static func fablePerLongPoint(_ pool: [[HistoryPoint]], now: Date) -> Double? {
+        let n = now.timeIntervalSince1970
+        var long = 0.0, fable = 0.0
+        for points in pool {
+            let reported = fablePoints(points)
+            guard let first = reported.first else { continue }
+            let since = max(first.t, n - levelWindow)
+            func total(_ source: [HistoryPoint]) -> Double {
+                usageEvents(source.filter { $0.t >= since }).reduce(0.0) { $1.t <= n ? $0 + $1.amount : $0 }
+            }
+            long += total(points)
+            fable += total(reported)
+        }
+        // A couple of weekly points is too coarse to divide by.
+        return long >= 3 && fable > 0 ? fable / long : nil
+    }
+
     public struct SimAccount: Sendable {
         public var remaining: Double
         public var resetAt: Date
@@ -309,6 +351,15 @@ public enum QuotaModel {
                                           elapsed: nil, projectedAtReset: nil)
             }
         }
+        if let r = latest.fable_reset, r > 0 {
+            var reset = r
+            let rolled = reset <= n
+            while reset <= n { reset += longPeriod }
+            let used = rolled ? 0 : (latest.fable_used ?? 0) * 100
+            state.fable = WindowState(used: used, resetAt: Date(timeIntervalSince1970: reset), period: longPeriod,
+                                      burnPerHour: burn(fablePoints(points), short: false, hours: longBurnHours, now: n),
+                                      elapsed: min(1, max(0, 1 - (reset - n) / longPeriod)), projectedAtReset: nil)
+        }
         return state
     }
 
@@ -387,8 +438,22 @@ public enum QuotaModel {
                     accts[i].long?.projectedAtReset = forecast.longAtReset[i]
                 }
             }
+            // The Fable-only weekly windows follow the weekly rhythm at what the recent mix of
+            // models costs in Fable points; until that is known, their own recent burn.
+            var fableRate: ((Date) -> Double)?
+            if let rate, let scale = fablePerLongPoint(accts.map { byAuth[$0.id]! }, now: now) {
+                fableRate = { rate($0) * scale }
+            }
+            let fable = poolWindow(accts.compactMap(\.fable), burnHours: longBurnHours, horizon: longPeriod,
+                                   watchBelow: 15, now: now, rate: fableRate)
+            if let fable {
+                for (i, used) in zip(accts.indices.filter({ accts[$0].fable != nil }), fable.usedAtReset) {
+                    accts[i].fable?.projectedAtReset = used
+                }
+            }
             pools.append(PoolState(provider: provider, accounts: accts, short: shortWindow, long: longWindow,
-                                   longBurnRecent: recent, dataAge: n - newest, forecast: forecast))
+                                   longBurnRecent: recent, dataAge: n - newest, forecast: forecast,
+                                   fable: fable?.window))
         }
         return pools
     }

@@ -442,3 +442,42 @@ private func squeezedPool(now: Date, aShort: Double = 0, aLong: Double = 0.99,
                                      now: now.addingTimeInterval(3600))
     #expect(account?.longConstrained == false)
 }
+
+
+// MARK: - Fable week
+
+@Test func fableWindowIsReadPerSeatAndPooled() {
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let n = now.timeIntervalSince1970
+    let reset = n + 48 * 3600
+    func point(_ auth: String, hoursAgo: Double, long: Double, fable: Double?) -> HistoryPoint {
+        HistoryPoint(t: n - hoursAgo * 3600, auth: auth, long_used: long, long_reset: reset,
+                     fable_used: fable, fable_reset: fable == nil ? nil : reset)
+    }
+    // "out" has used up its Fable window at 79% of its week; "left" burned 4 weekly points and
+    // 8 Fable points in the last six hours. Older points do not report the Fable window.
+    let points = [point("out", hoursAgo: 6, long: 0.75, fable: 1), point("out", hoursAgo: 0, long: 0.79, fable: 1),
+                  point("left", hoursAgo: 24, long: 0.02, fable: nil),
+                  point("left", hoursAgo: 6, long: 0.04, fable: 0.08), point("left", hoursAgo: 0, long: 0.08, fable: 0.16)]
+    let pool = QuotaModel.pools(points: points, activeAuths: ["out", "left"], now: now)[0]
+    let out = pool.accounts.first { $0.id == "out" }!, left = pool.accounts.first { $0.id == "left" }!
+    #expect(out.fable?.used == 100)
+    #expect(out.fableOut)
+    #expect(!out.constrained)  // the seat still serves other models
+    #expect(left.fable?.used == 16)
+    #expect(!left.fableOut)
+    #expect(left.fable?.resetAt == Date(timeIntervalSince1970: reset))
+    #expect(pool.fable?.used == 58)
+    // 8 Fable points in 24h of burn window leave the 84 that are left untouched for now.
+    #expect(pool.fable?.emptyAt == nil)
+    #expect(QuotaModel.fablePerLongPoint([points.filter { $0.auth == "left" }], now: now) == 2)
+    #expect(QuotaModel.fablePerLongPoint([points.filter { $0.auth == "out" }], now: now) == nil)
+
+    // After its reset the window is full again, and without Fable readings there is no Fable pool.
+    let later = QuotaModel.account(auth: "out", points: points.filter { $0.auth == "out" }, now: now.addingTimeInterval(49 * 3600))
+    #expect(later?.fable?.used == 0)
+    let plain = QuotaModel.pools(points: [HistoryPoint(t: n, auth: "a", long_used: 0.5, long_reset: reset)],
+                                 activeAuths: ["a"], now: now)[0]
+    #expect(plain.fable == nil)
+    #expect(plain.accounts[0].fable == nil)
+}

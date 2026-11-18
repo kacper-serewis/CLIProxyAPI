@@ -85,10 +85,14 @@ struct PoolSection: View {
                                burnLabel: long.learned ? "usual week" : "24h avg",
                                detail: String(format: "last 5h: %.1f pts/h", pool.longBurnRecent))
             }
+            if let fable = pool.fable {
+                FableWindowView(window: fable, accounts: pool.accounts, now: now)
+            }
             ForEach(pool.accounts) {
                 AccountView(account: $0, now: now,
                             shortPool: pool.headroomWarning ? .over : pool.short?.level ?? pool.level,
-                            longPool: pool.headroomWarning ? .over : pool.long?.level ?? pool.level)
+                            longPool: pool.headroomWarning ? .over : pool.long?.level ?? pool.level,
+                            fablePool: pool.fable?.level ?? .ok)
             }
         }
     }
@@ -141,12 +145,55 @@ struct PoolWindowView: View {
     }
 }
 
+/// The pooled Fable-only weekly windows: how much Fable is left across the seats and when
+/// it runs out. A seat that is out of it still serves other models.
+struct FableWindowView: View {
+    let window: PoolWindow
+    let accounts: [AccountState]
+    let now: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Fable week").font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(pct(window.used)) used").monospacedDigit()
+            }
+            UsageBar(used: window.used, marker: nil, level: window.level)
+            Text(verdict).font(.caption).foregroundStyle(window.level == .ok ? .secondary : window.level.color)
+            if !out.isEmpty {
+                Text(out).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var seats: [AccountState] { accounts.filter { $0.fable != nil } }
+
+    private var verdict: String {
+        if !seats.isEmpty, seats.allSatisfy(\.fableOut) {
+            let back = seats.compactMap { $0.fable?.resetAt }.min()
+            return "No Fable on any seat" + (back.map { " until \(when($0, now: now))" } ?? "")
+        }
+        if let empty = window.emptyAt {
+            return "\(window.learned ? "At your usual rhythm" : "At this pace") Fable runs out \(when(empty, now: now))"
+        }
+        return "Lowest projected Fable quota — \(pct(window.lowestLeft)) left"
+    }
+
+    private var out: String {
+        seats.filter(\.fableOut).map { seat in
+            "\(seat.name): no Fable" + (seat.fable?.resetAt.map { " until \(when($0, now: now))" } ?? "")
+        }.joined(separator: " · ")
+    }
+}
+
 struct AccountView: View {
     let account: AccountState
     let now: Date
     /// The pool's verdict for each window: a row is never more alarming than its pool.
     let shortPool: Level
     let longPool: Level
+    var fablePool: Level = .ok
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -168,6 +215,7 @@ struct AccountView: View {
             }
             if let s = account.short { row("5h", s, pool: shortPool) }
             if let l = account.long { row("Week", l, pool: longPool) }
+            if let f = account.fable { row("Fable", f, pool: fablePool) }
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
@@ -178,7 +226,7 @@ struct AccountView: View {
         let level = QuotaModel.accountLevel(w, pool: pool)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text(label).font(.caption).frame(width: 34, alignment: .leading)
+                Text(label).font(.caption).frame(width: 38, alignment: .leading)
                 UsageBar(used: w.used, marker: w.elapsed.map { $0 * 100 }, level: level)
                 Text(pct(w.used)).font(.caption).monospacedDigit().frame(width: 36, alignment: .trailing)
             }
@@ -192,7 +240,7 @@ struct AccountView: View {
                 }
             }
             .font(.caption2).foregroundStyle(.secondary)
-            .padding(.leading, 40)
+            .padding(.leading, 44)
         }
     }
 }
