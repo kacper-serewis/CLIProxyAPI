@@ -506,8 +506,9 @@ func TestSoonestResetFableWindowKeepsItsOwnReserve(t *testing.T) {
 
 // The usage poll reads the Fable-only weekly window and the quota history records it.
 func TestSoonestResetFableWindowIsReadAndRecorded(t *testing.T) {
-	now := time.Now().Truncate(time.Second)
-	week := now.Add(3 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	now := time.Now().Truncate(time.Minute)
+	// The payload's reset is a fraction of a second early; it is recorded on the minute.
+	week := now.Add(3*24*time.Hour - 400*time.Millisecond).UTC().Format(time.RFC3339Nano)
 	base := `"five_hour":{"utilization":10,"resets_at":"` + now.Add(time.Hour).UTC().Format(time.RFC3339) + `"},"seven_day":{"utilization":40,"resets_at":"` + week + `"}`
 	parse := func(extra string) map[string]string {
 		t.Helper()

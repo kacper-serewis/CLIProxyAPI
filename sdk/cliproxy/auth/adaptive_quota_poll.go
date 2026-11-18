@@ -134,6 +134,9 @@ func parseAdaptiveUsage(reader io.Reader, now time.Time) (map[string]string, boo
 		}
 	}
 	if used, reset, ok := parseAdaptiveFableUsage(payload); ok {
+		// The payload reports this reset a fraction of a second early or late, while the
+		// response headers give the whole minute it falls on. Keep one value for both.
+		reset = reset.Round(time.Minute)
 		signals[claudeFableSignalPrefix+"Utilization"] = strconv.FormatFloat(used, 'f', 6, 64)
 		signals[claudeFableSignalPrefix+"Reset"] = strconv.FormatInt(reset.Unix(), 10)
 		signals[claudeFableSignalPrefix+"Status"] = "allowed"
