@@ -356,8 +356,12 @@ public enum QuotaModel {
             let rolled = reset <= n
             while reset <= n { reset += longPeriod }
             let used = rolled ? 0 : (latest.fable_used ?? 0) * 100
+            // While the window has been recorded for less than a day, measure over what there
+            // is: dividing a first hour of usage by 24 would hide it.
+            let recorded = fablePoints(points)
+            let hours = min(longBurnHours, max(0.5, (n - (recorded.first?.t ?? n)) / 3600))
             state.fable = WindowState(used: used, resetAt: Date(timeIntervalSince1970: reset), period: longPeriod,
-                                      burnPerHour: burn(fablePoints(points), short: false, hours: longBurnHours, now: n),
+                                      burnPerHour: burn(recorded, short: false, hours: hours, now: n),
                                       elapsed: min(1, max(0, 1 - (reset - n) / longPeriod)), projectedAtReset: nil)
         }
         return state

@@ -468,8 +468,11 @@ private func squeezedPool(now: Date, aShort: Double = 0, aLong: Double = 0.99,
     #expect(!left.fableOut)
     #expect(left.fable?.resetAt == Date(timeIntervalSince1970: reset))
     #expect(pool.fable?.used == 58)
-    // 8 Fable points in 24h of burn window leave the 84 that are left untouched for now.
+    // Recorded for six hours, so the burn is measured over those: 8 points in 6 hours.
+    #expect(abs((left.fable?.burnPerHour ?? 0) - 8.0 / 6) < 1e-9)
+    // At that pace 64 of the 84 points left are used before both windows reset in 48 hours.
     #expect(pool.fable?.emptyAt == nil)
+    #expect(abs((pool.fable?.lowestLeft ?? 0) - 10) < 0.5)
     #expect(QuotaModel.fablePerLongPoint([points.filter { $0.auth == "left" }], now: now) == 2)
     #expect(QuotaModel.fablePerLongPoint([points.filter { $0.auth == "out" }], now: now) == nil)
 

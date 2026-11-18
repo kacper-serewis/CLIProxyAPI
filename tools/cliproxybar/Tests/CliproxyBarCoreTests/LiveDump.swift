@@ -14,13 +14,14 @@ import Testing
         print("POOL", p.provider, "age", Int(p.dataAge), "level", p.level)
         print("  availability", p.availability, "headroom returns", p.headroomAt as Any)
         print("  first headroom gap", p.forecast?.firstGap as Any)
-        for (n, w) in [("short", p.short), ("long", p.long)] {
+        for (n, w) in [("short", p.short), ("long", p.long), ("fable", p.fable)] {
             if let w { print("  ", n, String(format: "used %.1f burn %.2f sust %.2f pace %.2f lowest %.1f", w.used, w.burnPerHour, w.sustainablePerHour, w.pace, w.lowestLeft), w.emptyAt as Any, w.level, w.learned ? "learned" : "constant") }
         }
         for a in p.accounts {
             print("  ", a.name, a.nextChat ? "[next]" : "",
                   "5h", a.short.map { String(format: "%.0f%% burn %.1f proj %@ reset %@", $0.used, $0.burnPerHour, "\($0.projectedAtReset ?? -1)", "\($0.resetAt as Any)") } ?? "-",
-                  "| wk", a.long.map { String(format: "%.0f%% burn %.2f proj %.1f el %.2f", $0.used, $0.burnPerHour, $0.projectedAtReset ?? -1, $0.elapsed ?? -1) } ?? "-")
+                  "| wk", a.long.map { String(format: "%.0f%% burn %.2f proj %.1f el %.2f", $0.used, $0.burnPerHour, $0.projectedAtReset ?? -1, $0.elapsed ?? -1) } ?? "-",
+                  "| fable", a.fable.map { String(format: "%.0f%% burn %.2f proj %.1f", $0.used, $0.burnPerHour, $0.projectedAtReset ?? -1) } ?? "-")
         }
     }
 }
