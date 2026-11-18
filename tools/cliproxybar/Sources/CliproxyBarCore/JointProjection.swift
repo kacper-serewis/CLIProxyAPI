@@ -6,19 +6,26 @@ public struct HeadroomGap: Sendable {
 }
 
 public struct HeadroomForecast: Sendable {
+    /// Every gap up to `horizon`, which lies two weeks out so that one starting this week
+    /// has its real end.
     public var gaps: [HeadroomGap]
     public var horizon: Date
+    /// Gaps that start before this are listed and warned about: one week ahead, a full
+    /// round of weekly resets. Later ones are a rough guess and are only announced.
+    public var listUntil: Date = .distantFuture
     public var shortLowest: Double
     public var longLowest: Double
     public var shortAtReset: [Double?]
     public var longAtReset: [Double?]
-    public var firstGap: HeadroomGap? { gaps.first }
+    public var firstGap: HeadroomGap? { gaps.first { $0.start < listUntil } }
+    /// When the first gap after the listed week starts, if the forecast sees one.
+    public var nextGapStart: Date? { gaps.first { $0.start >= listUntil }?.start }
 
     /// The gaps that are going on or still to come, each with its length and how much of it
     /// falls in working hours. One that began earlier counts from `now`; one without an end
     /// runs to the horizon and lasts at least that long.
     public func events(now: Date, calendar: Calendar = .current) -> [HeadroomEvent] {
-        gaps.filter { $0.end.map { $0 > now } ?? true }.map { gap in
+        gaps.filter { $0.start < listUntil && ($0.end.map { $0 > now } ?? true) }.map { gap in
             let start = max(gap.start, now), end = gap.end ?? max(horizon, start)
             return HeadroomEvent(start: start, end: end, ended: gap.end != nil,
                                  working: QuotaModel.workingTime(from: start, to: end, calendar: calendar))
@@ -68,7 +75,7 @@ extension QuotaModel {
     /// it are assumed to finish soon). No backlog during a quota gap.
     public static func projectJoint(_ accounts: [AccountState], longRate: @escaping (Date) -> Double,
                                     shortRate: (Date) -> Double, now: Date,
-                                    horizon: TimeInterval = longPeriod, reserve: Bool = true) -> HeadroomForecast {
+                                    horizon: TimeInterval = 2 * longPeriod, reserve: Bool = true) -> HeadroomForecast {
         struct Seat {
             var longUsed: Double
             var shortUsed: Double?
@@ -89,7 +96,9 @@ extension QuotaModel {
         let sum = seats.reduce(0) { $0 + $1.share }
         if sum > 0 { for i in seats.indices { seats[i].share /= sum } }
         let end = now.addingTimeInterval(horizon)
-        var result = HeadroomForecast(gaps: [], horizon: end, shortLowest: 100, longLowest: 100,
+        // The pool's lowest level is the coming week's, however far the forecast runs.
+        let week = now.addingTimeInterval(min(horizon, longPeriod))
+        var result = HeadroomForecast(gaps: [], horizon: end, listUntil: week, shortLowest: 100, longLowest: 100,
                                       shortAtReset: Array(repeating: nil, count: seats.count),
                                       longAtReset: Array(repeating: nil, count: seats.count))
         guard !seats.isEmpty else { return result }
@@ -102,7 +111,7 @@ extension QuotaModel {
             reserve && inReserve(longUsed: seats[i].longUsed, reset: seats[i].longReset, at: time, expected: expected)
         }
         func record(_ time: Date) {
-            result.longLowest = min(result.longLowest, seats.reduce(0) { $0 + 100 - $1.longUsed } / Double(seats.count))
+            if time <= week { result.longLowest = min(result.longLowest, seats.reduce(0) { $0 + 100 - $1.longUsed } / Double(seats.count)) }
             let shorts = seats.compactMap(\.shortUsed)
             if !shorts.isEmpty && time <= now.addingTimeInterval(shortPeriod) { result.shortLowest = min(result.shortLowest, shorts.reduce(0) { $0 + 100 - $1 } / Double(shorts.count)) }
         }

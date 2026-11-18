@@ -215,7 +215,9 @@ public enum QuotaModel {
             if p.t > now { break }
             if let pr = prev {
                 if abs(pr.reset - cur.reset) < 600 { consumed += max(0, cur.used - pr.used) }
-                else if pr.reset <= p.t { consumed += cur.used }
+                // 5h windows: one that follows an expired window starts from zero. The week
+                // starts at its first reading, like the panel's burnRatePerHour.
+                else if short, pr.reset <= p.t { consumed += cur.used }
             }
             prev = cur
         }
@@ -421,9 +423,9 @@ public enum QuotaModel {
                                          recentHours: shortBurnHours, now: now, calendar: calendar)
 
             }
-            let constantLongBurn = accts.reduce(0.0) { $0 + ($1.long?.burnPerHour ?? 0) }
+            // Without a learned rhythm the recent pace is held constant, like the panel.
             let forecast = accts.allSatisfy { $0.long != nil } ? projectJoint(accts,
-                longRate: rate ?? { _ in constantLongBurn },
+                longRate: rate ?? { _ in recent },
                 shortRate: shortRate ?? { _ in shorts.reduce(0) { $0 + $1.burnPerHour } }, now: now,
                 reserve: rate != nil) : nil
             var shortWindow = poolWindow(shorts, burnHours: shortBurnHours, horizon: shortPeriod,

@@ -62,6 +62,10 @@ struct PoolSection: View {
             if pool.level != .stale, let events = pool.forecast?.events(now: now), !events.isEmpty {
                 HeadroomEventsView(events: events)
             }
+            if pool.level != .stale, let next = pool.forecast?.nextGapStart {
+                Text("First gap after these 7 days: \(next.formatted(.dateTime.weekday(.abbreviated).day().hour().minute())), a rough guess.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if pool.availability.needsAttention {
                 VStack(alignment: .leading, spacing: 4) {
                     Label(pool.availability == .exhausted ? "Every account has a full quota window."

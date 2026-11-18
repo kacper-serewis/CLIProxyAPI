@@ -7,6 +7,7 @@ let package = Package(
     targets: [
         .target(name: "CliproxyBarCore"),
         .executableTarget(name: "CliproxyBar", dependencies: ["CliproxyBarCore"]),
-        .testTarget(name: "CliproxyBarCoreTests", dependencies: ["CliproxyBarCore"]),
+        // Fixtures are read from the source tree (see ForecastGoldenTests), not bundled.
+        .testTarget(name: "CliproxyBarCoreTests", dependencies: ["CliproxyBarCore"], exclude: ["Fixtures"]),
     ]
 )
