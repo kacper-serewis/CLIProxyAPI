@@ -18,10 +18,12 @@ public struct HeadroomForecast: Sendable {
 extension QuotaModel {
     /// Keep in step with the panel's jointQuotaProjection.ts. One workload consumes both
     /// windows on a seat. Preserve observed workload shares until a safety threshold,
-    /// then move that share to the soonest weekly reset. No backlog during a quota gap.
-    public static func projectJoint(_ accounts: [AccountState], longRate: (Date) -> Double,
+    /// then move that share to the soonest weekly reset. A seat in its weekly reserve hands
+    /// its share over too and only works when no other seat has headroom (chats already on
+    /// it are assumed to finish soon). No backlog during a quota gap.
+    public static func projectJoint(_ accounts: [AccountState], longRate: @escaping (Date) -> Double,
                                     shortRate: (Date) -> Double, now: Date,
-                                    horizon: TimeInterval = longPeriod) -> HeadroomForecast {
+                                    horizon: TimeInterval = longPeriod, reserve: Bool = true) -> HeadroomForecast {
         struct Seat {
             var longUsed: Double
             var shortUsed: Double?
@@ -50,6 +52,10 @@ extension QuotaModel {
         func eligible(_ i: Int) -> Bool {
             seats[i].longUsed < newChatLongLimit - epsilon && (seats[i].shortUsed ?? 0) < newChatShortLimit - epsilon
         }
+        let expected = ExpectedUsage(rate: longRate, now: now)
+        func reserved(_ i: Int, at time: Date) -> Bool {
+            reserve && inReserve(longUsed: seats[i].longUsed, reset: seats[i].longReset, at: time, expected: expected)
+        }
         func record(_ time: Date) {
             result.longLowest = min(result.longLowest, seats.reduce(0) { $0 + 100 - $1.longUsed } / Double(seats.count))
             let shorts = seats.compactMap(\.shortUsed)
@@ -70,7 +76,10 @@ extension QuotaModel {
                     seats[i].shortReset = .distantFuture
                 }
             }
-            let order = seats.indices.filter { eligible($0) }.sorted {
+            let open = seats.indices.filter { eligible($0) }
+            let free = open.filter { !reserved($0, at: t) }
+            // Reserved seats take the overflow only when no other seat has headroom.
+            let order = (free.isEmpty ? open : free).sorted {
                 seats[$0].longReset == seats[$1].longReset ? $0 < $1 : seats[$0].longReset < seats[$1].longReset
             }
             let nextReset = seats.map { min($0.longReset, $0.shortReset) }.min() ?? end
@@ -81,14 +90,18 @@ extension QuotaModel {
                 continue
             }
             if !result.gaps.isEmpty, result.gaps.last?.end == nil { result.gaps[result.gaps.count - 1].end = t }
-            var weights = seats.indices.map { eligible($0) ? seats[$0].share : 0 }
+            var weights = seats.indices.map { order.contains($0) ? seats[$0].share : 0 }
             weights[order[0]] += max(0, 1 - weights.reduce(0, +))
             let next = min(t.addingTimeInterval(300), end, nextReset)
             let mid = t.addingTimeInterval(next.timeIntervalSince(t) / 2)
             let longBurn = max(0, longRate(mid)), shortBurn = max(0, shortRate(mid))
             var dt = next.timeIntervalSince(t)
             for i in order where weights[i] > 0 {
-                if longBurn > 0 { dt = min(dt, (newChatLongLimit - seats[i].longUsed) / (longBurn * weights[i]) * 3600) }
+                if longBurn > 0 {
+                    // Stop where the seat enters its reserve, so that is decided at the threshold.
+                    let limit = reserve && seats[i].longUsed < longReserveLimit - epsilon ? longReserveLimit : newChatLongLimit
+                    dt = min(dt, (limit - seats[i].longUsed) / (longBurn * weights[i]) * 3600)
+                }
                 if shortBurn > 0, let used = seats[i].shortUsed { dt = min(dt, (newChatShortLimit - used) / (shortBurn * weights[i]) * 3600) }
             }
             for i in order where weights[i] > 0 {

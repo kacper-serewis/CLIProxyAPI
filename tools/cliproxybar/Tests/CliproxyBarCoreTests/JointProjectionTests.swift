@@ -62,6 +62,43 @@ private func seat(_ id: String, long: Double, short: Double?, longReset: Double,
     #expect(gap.end == nil)
 }
 
+@Test func weeklyReserveHandsOverNewWorkAndOnlyTakesTheOverflow() throws {
+    // a reaches its reserve after an hour. b carries the work until its 5h window is full,
+    // a covers the two hours until that window resets: no gap.
+    let accounts = [seat("a", long: 82, short: 0, longReset: 30, shortReset: nil, burn: 30),
+                    seat("b", long: 40, short: 0, longReset: 100, shortReset: nil)]
+    let forecast = QuotaModel.projectJoint(accounts, longRate: { _ in 2 }, shortRate: { _ in 30 },
+                                          now: start, horizon: 8 * 3600)
+    #expect(forecast.gaps.isEmpty)
+    #expect(abs((forecast.shortAtReset[0] ?? 0) - 60) < 1e-6)
+    #expect(abs((forecast.shortAtReset[1] ?? 0) - 90) < 1e-6)
+    // a: 84 at the hand-over plus two hours of overflow; b: five hours of work.
+    #expect(abs(forecast.longLowest - (12 + 50) / 2) < 1e-6)
+}
+
+@Test func weeklyReserveIsReleasedOnceTheExpectedUsageIsNeededToFinishIt() throws {
+    // a has 9 points left and 2 points an hour are expected: kept while more than 18 points
+    // are expected before its reset, so for three hours. After that it takes half of the
+    // work, which is what finishes it exactly at its reset.
+    let accounts = [seat("a", long: 90, short: 0, longReset: 12, shortReset: nil, burn: 10),
+                    seat("b", long: 10, short: 0, longReset: 120, shortReset: nil)]
+    let forecast = QuotaModel.projectJoint(accounts, longRate: { _ in 2 }, shortRate: { _ in 10 },
+                                          now: start, horizon: 13 * 3600)
+    #expect(forecast.gaps.isEmpty)
+    // b: three hours alone and two hours of half the work; a: five hours of half.
+    #expect(abs((forecast.shortAtReset[1] ?? 0) - 40) < 1)
+    #expect(abs((forecast.shortAtReset[0] ?? 0) - 25) < 1)
+    #expect(abs((forecast.longAtReset[0] ?? 0) - 99) < 0.5)
+    // With little usage expected nothing is held back: a works from the start.
+    let quiet = QuotaModel.projectJoint(accounts, longRate: { _ in 1 }, shortRate: { _ in 10 },
+                                       now: start, horizon: 6 * 3600)
+    #expect(abs((quiet.shortAtReset[0] ?? 0) - 50) < 1e-6)
+    // Without a forecast the router keeps no reserve, and neither does the projection.
+    let blind = QuotaModel.projectJoint(accounts, longRate: { _ in 2 }, shortRate: { _ in 10 },
+                                       now: start, horizon: 6 * 3600, reserve: false)
+    #expect(abs((blind.shortAtReset[0] ?? 0) - 45) < 1e-6)
+}
+
 @Test func forecastWarnsAndNotifiesBeforeCurrentHeadroomIsLost() throws {
     let accounts = [seat("a", long: 98, short: 0, longReset: 5, shortReset: nil),
                     seat("b", long: 65, short: 80, longReset: 72, shortReset: 2, burn: 20)]

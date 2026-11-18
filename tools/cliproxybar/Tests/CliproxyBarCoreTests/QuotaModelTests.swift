@@ -53,8 +53,33 @@ import Testing
                      observedAt: now)
     }
     var accounts = [acct("a", short: 95, longReset: 100), acct("b", short: 10, longReset: 200)]
-    QuotaModel.markNextChat(&accounts)
+    QuotaModel.markNextChat(&accounts, now: now)
     #expect(accounts.map(\.nextChat) == [false, true])
+}
+
+@Test func nextChatSkipsAWeeklyReserveUntilItIsNeededOrReleased() {
+    let now = Date(timeIntervalSince1970: 0)
+    func acct(_ id: String, long: Double, short: Double = 10, resetHours: Double) -> AccountState {
+        AccountState(id: id, name: id, provider: "claude",
+                     short: WindowState(used: short, resetAt: nil, period: 1, burnPerHour: 0),
+                     long: WindowState(used: long, resetAt: now.addingTimeInterval(resetHours * 3600), period: 1, burnPerHour: 0),
+                     observedAt: now)
+    }
+    // Two points an hour expected: 40 over the next 20 hours.
+    func next(_ accounts: [AccountState], rate: ((Date) -> Double)? = { _ in 2 }) -> [Bool] {
+        var accounts = accounts
+        QuotaModel.markNextChat(&accounts, now: now, longRate: rate)
+        return accounts.map(\.nextChat)
+    }
+    #expect(next([acct("soon", long: 83, resetHours: 20), acct("late", long: 10, resetHours: 100)]) == [true, false])
+    #expect(next([acct("soon", long: 84, resetHours: 20), acct("late", long: 10, resetHours: 100)]) == [false, true])
+    // The other seat's 5h window is full: the reserve takes the overflow.
+    #expect(next([acct("soon", long: 90, resetHours: 20), acct("late", long: 10, short: 92, resetHours: 100)]) == [true, false])
+    // 12 points expected in the last 6 hours: 9 points left are released, 5 are still kept.
+    #expect(next([acct("soon", long: 90, resetHours: 6), acct("late", long: 10, resetHours: 100)]) == [true, false])
+    #expect(next([acct("soon", long: 94, resetHours: 6), acct("late", long: 10, resetHours: 100)]) == [false, true])
+    // Without a learned rhythm there is no forecast and no reserve.
+    #expect(next([acct("soon", long: 90, resetHours: 20), acct("late", long: 10, resetHours: 100)], rate: nil) == [true, false])
 }
 
 // MARK: - Usage rhythm

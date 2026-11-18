@@ -163,6 +163,9 @@ struct AccountView: View {
                 Text("\(account.shortConstrained && account.longConstrained ? "5h + weekly" : account.shortConstrained ? "5h" : "Weekly") quota \(account.exhausted ? "at limit" : "near limit")")
                     .font(.caption2).foregroundStyle(shortPool == .over || longPool == .over ? .red : .secondary)
             }
+            if account.reserved && !account.nextChat {
+                Text("Kept for when the other seat is full").font(.caption2).foregroundStyle(.secondary)
+            }
             if let s = account.short { row("5h", s, pool: shortPool) }
             if let l = account.long { row("Week", l, pool: longPool) }
         }

@@ -47,6 +47,8 @@ public struct AccountState: Sendable, Identifiable {
     public var long: WindowState?
     public var observedAt: Date
     public var nextChat = false
+    /// In its weekly reserve: new chats go to another seat while one has room.
+    public var reserved = false
     /// Usage readings can jitter down without a reset. Keep availability conservative,
     /// while the bars still show the latest reported percentage.
     public var shortHighWaterUsed: Double?
@@ -134,6 +136,41 @@ public enum QuotaModel {
     /// Router thresholds for new chats (selector_soonest_reset.go).
     public static let newChatShortLimit = 90.0
     public static let newChatLongLimit = 99.0
+    /// From this weekly usage a seat is kept for overflow: new chats go to another seat while
+    /// one has room. A full 5h window costs about 15 weekly points.
+    public static let longReserveLimit = 84.0
+    /// The reserve is released once the usage expected before the weekly reset is at most this
+    /// many times what is left, so it is spent, not lost. Held on that line, the seat takes
+    /// 1/reserveCover of the work and runs out at its reset.
+    public static let reserveCover = 2.0
+
+    /// Usage expected from `now` on, in points: `rate` is points per hour. Cumulative on a
+    /// 15-minute grid that grows as far as it is asked.
+    final class ExpectedUsage {
+        private let rate: (Date) -> Double
+        private let now: Date
+        private var cumulative = [0.0]
+        private static let step: TimeInterval = 900
+        init(rate: @escaping (Date) -> Double, now: Date) { self.rate = rate; self.now = now }
+        private func by(_ time: Date) -> Double {
+            let steps = max(0, time.timeIntervalSince(now) / Self.step)
+            let last = min(Int(steps.rounded(.up)), 4 * 24 * 60) // weekly resets lie within 60 days
+            while cumulative.count <= last {
+                let from = now.addingTimeInterval(Double(cumulative.count - 1) * Self.step)
+                cumulative.append(cumulative[cumulative.count - 1]
+                    + max(0, rate(from.addingTimeInterval(Self.step / 2))) * Self.step / 3600)
+            }
+            let floor = min(Int(steps.rounded(.down)), last)
+            return cumulative[floor] + (cumulative[last] - cumulative[floor]) * (steps - Double(floor))
+        }
+        func between(_ from: Date, _ to: Date) -> Double { by(to) - by(from) }
+    }
+
+    /// Whether a seat this far into its week is kept for overflow (selector_soonest_reset.go).
+    static func inReserve(longUsed: Double, reset: Date, at time: Date, expected: ExpectedUsage) -> Bool {
+        longUsed >= longReserveLimit - 1e-8 && reset != .distantFuture
+            && expected.between(time, reset) > reserveCover * (newChatLongLimit - longUsed) + 1e-8
+    }
 
     public static func parse(_ data: Data) -> [HistoryPoint] {
         let decoder = JSONDecoder()
@@ -305,7 +342,6 @@ public enum QuotaModel {
                                                  elapsed: nil, projectedAtReset: nil)
                 }
             }
-            markNextChat(&accts)
             let recent = accts.reduce(0.0) { sum, a in
                 sum + burn(byAuth[a.id]!, short: false, hours: recentLongHours, now: n)
             }
@@ -314,6 +350,8 @@ public enum QuotaModel {
             let rate = profile.map {
                 projectedRate($0, recentBurn: recent, recentHours: recentLongHours, now: now, calendar: calendar)
             }
+            // Without a learned rhythm there is no forecast, and the router keeps no reserve.
+            markNextChat(&accts, now: now, longRate: rate)
             let withLong = accts.indices.filter { accts[$0].long != nil }
             let long = poolWindow(withLong.map { accts[$0].long! }, burnHours: longBurnHours,
                                   horizon: longPeriod, watchBelow: 15, now: now,
@@ -331,7 +369,8 @@ public enum QuotaModel {
             let constantLongBurn = accts.reduce(0.0) { $0 + ($1.long?.burnPerHour ?? 0) }
             let forecast = accts.allSatisfy { $0.long != nil } ? projectJoint(accts,
                 longRate: rate ?? { _ in constantLongBurn },
-                shortRate: shortRate ?? { _ in shorts.reduce(0) { $0 + $1.burnPerHour } }, now: now) : nil
+                shortRate: shortRate ?? { _ in shorts.reduce(0) { $0 + $1.burnPerHour } }, now: now,
+                reserve: rate != nil) : nil
             var shortWindow = poolWindow(shorts, burnHours: shortBurnHours, horizon: shortPeriod,
                                          watchBelow: 20, now: now, rate: shortRate)?.window
             var longWindow = long?.window
@@ -372,9 +411,20 @@ public enum QuotaModel {
     }
 
     /// Soonest-reset: new chats go to the account whose weekly window resets first, unless it is
-    /// past the new-chat thresholds.
-    static func markNextChat(_ accounts: inout [AccountState]) {
-        let candidates = accounts.indices.filter { !accounts[$0].constrained }
+    /// past the new-chat thresholds. An account in its weekly reserve only gets one when no
+    /// other account has room.
+    static func markNextChat(_ accounts: inout [AccountState], now: Date, longRate: ((Date) -> Double)? = nil) {
+        if let longRate {
+            let expected = ExpectedUsage(rate: longRate, now: now)
+            for i in accounts.indices where !accounts[i].constrained {
+                guard let long = accounts[i].long else { continue }
+                accounts[i].reserved = inReserve(longUsed: max(long.used, accounts[i].longHighWaterUsed ?? 0),
+                                                 reset: long.resetAt ?? .distantFuture, at: now, expected: expected)
+            }
+        }
+        let open = accounts.indices.filter { !accounts[$0].constrained }
+        let free = open.filter { !accounts[$0].reserved }
+        let candidates = free.isEmpty ? open : free
         if let i = candidates.min(by: {
             (accounts[$0].long?.resetAt ?? .distantFuture) < (accounts[$1].long?.resetAt ?? .distantFuture)
         }) { accounts[i].nextChat = true }
