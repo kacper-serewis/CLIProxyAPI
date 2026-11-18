@@ -59,6 +59,9 @@ struct PoolSection: View {
                         .foregroundStyle(.secondary)
                 }.font(.caption)
             }
+            if pool.level != .stale, let events = pool.forecast?.events(now: now), !events.isEmpty {
+                HeadroomEventsView(events: events)
+            }
             if pool.availability.needsAttention {
                 VStack(alignment: .leading, spacing: 4) {
                     Label(pool.availability == .exhausted ? "Every account has a full quota window."
@@ -142,6 +145,40 @@ struct PoolWindowView: View {
         var s = String(format: "Burn %.1f pts/h (%@) · %.1f× sustainable", window.burnPerHour, burnLabel, window.pace)
         if let detail { s += " · " + detail }
         return s
+    }
+}
+
+/// The expected periods without safe headroom in the coming week, with their length and how
+/// much of it falls in working hours.
+struct HeadroomEventsView: View {
+    let events: [HeadroomEvent]
+    private static let shown = 6
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("No safe headroom, next 7 days").font(.caption.weight(.semibold))
+            ForEach(Array(events.prefix(Self.shown).enumerated()), id: \.offset) { _, event in
+                HStack {
+                    Text(span(event))
+                    Spacer()
+                    Text((event.ended ? "" : "at least ") + duration(event.length)
+                         + (event.working >= 60 ? " · \(duration(event.working)) working hours" : ""))
+                        .foregroundStyle(event.working >= 60 ? .red : .secondary)
+                }.monospacedDigit()
+            }
+            if events.count > Self.shown { Text("and \(events.count - Self.shown) more") }
+            Text("Total \(duration(events.reduce(0) { $0 + $1.length })), \(duration(events.reduce(0) { $0 + $1.working })) in working hours")
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption)
+    }
+
+    private func span(_ event: HeadroomEvent) -> String {
+        let day = Date.FormatStyle.dateTime.weekday(.abbreviated)
+        let from = "\(event.start.formatted(day)) \(event.start.formatted(date: .omitted, time: .shortened))"
+        let sameDay = Calendar.current.isDate(event.start, inSameDayAs: event.end)
+        let to = (sameDay ? "" : "\(event.end.formatted(day)) ") + event.end.formatted(date: .omitted, time: .shortened)
+        return "\(from) – \(to)"
     }
 }
 

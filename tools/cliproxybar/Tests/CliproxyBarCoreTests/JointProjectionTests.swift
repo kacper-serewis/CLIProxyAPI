@@ -121,3 +121,30 @@ private func seat(_ id: String, long: Double, short: Double?, longReset: Double,
     #expect(!pool.headroomWarning)
     #expect(pool.level == .stale)
 }
+
+
+@Test func headroomEventsListTheGapsWithLengthAndWorkingHours() {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Amsterdam")!
+    // Wednesday 18 November 2026; working hours are 9:30 to 17:30 on weekdays.
+    func at(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
+        calendar.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: minute))!
+    }
+    #expect(QuotaModel.workingTime(from: at(18, 16), to: at(18, 19), calendar: calendar) == 1.5 * 3600)
+    #expect(QuotaModel.workingTime(from: at(18, 18), to: at(19, 10), calendar: calendar) == 0.5 * 3600)
+    #expect(QuotaModel.workingTime(from: at(20, 17), to: at(23, 10), calendar: calendar) == 3600)
+    #expect(QuotaModel.workingTime(from: at(21, 9), to: at(22, 20), calendar: calendar) == 0)
+
+    let forecast = HeadroomForecast(gaps: [HeadroomGap(start: at(18, 9), end: at(18, 11)),
+                                           HeadroomGap(start: at(18, 11), end: at(18, 13)),
+                                           HeadroomGap(start: at(19, 17), end: at(19, 18)),
+                                           HeadroomGap(start: at(24, 20), end: nil)],
+                                    horizon: at(25, 12), shortLowest: 0, longLowest: 0, shortAtReset: [], longAtReset: [])
+    let events = forecast.events(now: at(18, 12), calendar: calendar)
+    #expect(events == [
+        HeadroomEvent(start: at(18, 12), end: at(18, 13), ended: true, working: 3600),  // counted from now on
+        HeadroomEvent(start: at(19, 17), end: at(19, 18), ended: true, working: 1800),
+        HeadroomEvent(start: at(24, 20), end: at(25, 12), ended: false, working: 2.5 * 3600),
+    ])
+    #expect(events[2].length == 16 * 3600)
+}

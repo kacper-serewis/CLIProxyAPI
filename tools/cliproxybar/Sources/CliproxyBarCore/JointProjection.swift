@@ -13,6 +13,51 @@ public struct HeadroomForecast: Sendable {
     public var shortAtReset: [Double?]
     public var longAtReset: [Double?]
     public var firstGap: HeadroomGap? { gaps.first }
+
+    /// The gaps that are going on or still to come, each with its length and how much of it
+    /// falls in working hours. One that began earlier counts from `now`; one without an end
+    /// runs to the horizon and lasts at least that long.
+    public func events(now: Date, calendar: Calendar = .current) -> [HeadroomEvent] {
+        gaps.filter { $0.end.map { $0 > now } ?? true }.map { gap in
+            let start = max(gap.start, now), end = gap.end ?? max(horizon, start)
+            return HeadroomEvent(start: start, end: end, ended: gap.end != nil,
+                                 working: QuotaModel.workingTime(from: start, to: end, calendar: calendar))
+        }
+    }
+}
+
+/// One expected period without safe headroom.
+public struct HeadroomEvent: Sendable, Equatable {
+    public var start: Date
+    public var end: Date
+    /// False when headroom does not return within the forecast.
+    public var ended: Bool
+    /// How much of it falls in working hours.
+    public var working: TimeInterval
+    public var length: TimeInterval { end.timeIntervalSince(start) }
+}
+
+extension QuotaModel {
+    /// Working hours, local time on weekdays: where a gap hurts. Same as the panel's list.
+    public static let workStartMinutes = 9 * 60 + 30
+    public static let workEndMinutes = 17 * 60 + 30
+
+    /// The part of a period that falls in working hours.
+    public static func workingTime(from start: Date, to end: Date, calendar: Calendar = .current) -> TimeInterval {
+        var total: TimeInterval = 0
+        var day = calendar.startOfDay(for: start)
+        while day < end {
+            let weekday = calendar.component(.weekday, from: day)
+            if weekday >= 2 && weekday <= 6,
+               let from = calendar.date(byAdding: .minute, value: workStartMinutes, to: day),
+               let to = calendar.date(byAdding: .minute, value: workEndMinutes, to: day) {
+                total += max(0, min(end, to).timeIntervalSince(max(start, from)))
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        return total
+    }
 }
 
 extension QuotaModel {

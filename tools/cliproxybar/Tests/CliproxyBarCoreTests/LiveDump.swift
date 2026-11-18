@@ -14,6 +14,11 @@ import Testing
         print("POOL", p.provider, "age", Int(p.dataAge), "level", p.level)
         print("  availability", p.availability, "headroom returns", p.headroomAt as Any)
         print("  first headroom gap", p.forecast?.firstGap as Any)
+        let day = Date.FormatStyle.dateTime.weekday(.abbreviated).day().hour().minute()
+        for e in p.forecast?.events(now: Date()) ?? [] {
+            print("  gap", e.start.formatted(day), "–", e.end.formatted(day), e.ended ? "" : "(at least)",
+                  Int(e.length / 60), "min,", Int(e.working / 60), "min in working hours")
+        }
         for (n, w) in [("short", p.short), ("long", p.long), ("fable", p.fable)] {
             if let w { print("  ", n, String(format: "used %.1f burn %.2f sust %.2f pace %.2f lowest %.1f", w.used, w.burnPerHour, w.sustainablePerHour, w.pace, w.lowestLeft), w.emptyAt as Any, w.level, w.learned ? "learned" : "constant") }
         }
