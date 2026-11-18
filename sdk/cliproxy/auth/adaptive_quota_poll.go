@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -21,23 +21,16 @@ import (
 // and never change credential cooldown, refresh, or session-affinity state.
 func (m *Manager) startAdaptiveQuotaPolling(ctx context.Context) {
 	go func() {
-		var pending sync.Map
 		ticker := time.NewTicker(quotaHistorySampleInterval)
 		defer ticker.Stop()
 		for {
 			cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 			if cfg != nil && pollsClaudeUsage(cfg.Routing.Strategy) {
 				for _, a := range m.List() {
-					if a.Disabled || !strings.EqualFold(a.Provider, "claude") || a.AuthKind() == AuthKindAPIKey {
+					if !claudeUsageEligible(a) {
 						continue
 					}
-					if _, loaded := pending.LoadOrStore(a.ID, true); loaded {
-						continue
-					}
-					go func(a *Auth) {
-						defer pending.Delete(a.ID)
-						m.pollAdaptiveQuota(ctx, a)
-					}(a)
+					go m.readClaudeUsage(ctx, a, false)
 				}
 			}
 			select {
@@ -61,7 +54,7 @@ func pollsClaudeUsage(strategy string) bool {
 
 func (m *Manager) pollAdaptiveQuota(ctx context.Context, a *Auth) {
 	started := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.anthropic.com/api/oauth/usage", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeUsageURL, nil)
 	if err != nil {
 		return
 	}
@@ -73,15 +66,24 @@ func (m *Manager) pollAdaptiveQuota(ctx context.Context, a *Auth) {
 		// Do not log arbitrary upstream errors or bodies: they can contain credentials.
 		if ctx.Err() == nil {
 			log.Warnf("adaptive-reserve: quota read failed auth=%s", a.ID)
+			m.claudeUsage.record(a.ID, started, 0, nil, 0)
 		}
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		m.claudeUsage.record(a.ID, started, resp.StatusCode, nil, parseRetryAfter(resp.Header.Get("Retry-After")))
 		log.Warnf("adaptive-reserve: quota read auth=%s status=%d", a.ID, resp.StatusCode)
 		return
 	}
-	signals, ok := parseAdaptiveUsage(io.LimitReader(resp.Body, 1<<20), started)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, claudeUsageMaxBody))
+	if err != nil || !json.Valid(raw) {
+		m.claudeUsage.record(a.ID, started, resp.StatusCode, nil, 0)
+		log.Warnf("adaptive-reserve: invalid quota response auth=%s", a.ID)
+		return
+	}
+	m.claudeUsage.record(a.ID, started, resp.StatusCode, json.RawMessage(raw), 0)
+	signals, ok := parseAdaptiveUsage(bytes.NewReader(raw), started)
 	if !ok {
 		log.Warnf("adaptive-reserve: invalid quota response auth=%s", a.ID)
 		return

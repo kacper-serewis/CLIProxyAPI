@@ -44,6 +44,8 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/requests/in-flight", s.mgmt.GetInFlightRequests)
 	v8.GET("/observability/quota-history", s.mgmt.GetQuotaHistory)
 	v8.GET("/observability/routing", s.mgmt.GetRoutingActivity)
+	v8.GET("/observability/claude-usage", s.mgmt.GetClaudeUsage)
+	v8.POST("/observability/claude-usage/refresh", s.mgmt.RefreshClaudeUsage)
 	v8.GET("/observability/fork", s.mgmt.GetForkStatus)
 	v8.GET("/observability/chats/transcript", s.mgmt.GetChatTranscript)
 	v8.GET("/observability/chats/feed", s.mgmt.GetChatFeed)

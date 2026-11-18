@@ -186,6 +186,7 @@ type resultPolicyHolder struct {
 type Manager struct {
 	inFlightTracker           *inFlightTracker
 	adaptiveHistory           *quotaDemandHistory
+	claudeUsage               claudeUsageCache
 	store                     Store
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore

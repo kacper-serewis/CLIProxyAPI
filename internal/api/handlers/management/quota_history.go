@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -50,4 +51,40 @@ func (h *Handler) GetRoutingActivity(c *gin.Context) {
 			"codex":  h.authManager.RoutingQueue("codex", now),
 		},
 	})
+}
+
+// GetClaudeUsage returns the last usage payload the proxy read for each active Claude
+// account (including the banked reset grants), so the panel does not call Anthropic's
+// rate-limited usage endpoint itself.
+func (h *Handler) GetClaudeUsage(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth manager unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"accounts": h.authManager.ClaudeUsageSnapshots()})
+}
+
+// RefreshClaudeUsage reads one account's usage now through the proxy's single reader
+// and returns the resulting snapshot. Body: {"auth_index": "..."}.
+func (h *Handler) RefreshClaudeUsage(c *gin.Context) {
+	var body struct {
+		AuthIndex string `json:"auth_index"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	auth := h.authByIndex(body.AuthIndex)
+	if auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	snapshot, ok := h.authManager.RefreshClaudeUsage(ctx, auth.ID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not an active Claude account"})
+		return
+	}
+	c.JSON(http.StatusOK, snapshot)
 }
