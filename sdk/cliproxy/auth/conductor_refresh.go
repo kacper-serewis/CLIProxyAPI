@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1623,8 +1624,14 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 					current.StatusMessage = "invalid grant (retrying)"
 					shouldReschedule = true
 				} else {
-					current.RefreshFailures = 0
-					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+					backoff := refreshFailureBackoff
+					if isRefreshConnectionFailure(err) {
+						current.RefreshFailures++
+						backoff = refreshConnectionBackoff(current.RefreshFailures)
+					} else {
+						current.RefreshFailures = 0
+					}
+					current.NextRefreshAfter = now.Add(backoff)
 					current.StatusMessage = "token expired"
 					shouldReschedule = true
 				}
@@ -1849,4 +1856,22 @@ func (m *Manager) ForceRefreshAll(ctx context.Context) []ForceRefreshResult {
 	}
 	wg.Wait()
 	return results
+}
+
+// Connection failures before a request reaches upstream are common at boot/wake.
+// Retry expired credentials promptly without changing server or grant error policy.
+func isRefreshConnectionFailure(err error) bool {
+	var dns *net.DNSError
+	var op *net.OpError
+	return errors.As(err, &dns) || (errors.As(err, &op) && op.Op == "dial")
+}
+
+func refreshConnectionBackoff(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	if failures >= 4 {
+		return 30 * time.Second
+	}
+	return 5 * time.Second * time.Duration(1<<(failures-1))
 }
